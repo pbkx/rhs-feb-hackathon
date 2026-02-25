@@ -1,4 +1,4 @@
-import type { FeatureCollection, LineString, Point } from "geojson"
+import type { FeatureCollection, LineString, Point, Polygon } from "geojson"
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001"
 
@@ -47,15 +47,18 @@ export interface AccessBlockerCandidate {
   blocker_type: AccessBlockerType
   name: string
   score: number
-  unlock_km: number
-  gain_km: number
-  blocked_km: number
-  unlocked_healthcare_score: number
-  unlocked_essentials_score: number
-  unlocked_healthcare_counts: Record<string, number>
-  unlocked_essentials_counts: Record<string, number>
+  unlock_m: number
+  blocked_m: number
+  distance_m: number
+  delta_nas_points: number
+  delta_oas_points: number
+  delta_general_points: number
+  baseline_general_index: number
+  post_fix_general_index: number
+  unlocked_poi_count: number
+  unlocked_destination_counts: Record<string, number>
+  unlocked_component_id: number | null
   confidence: "high" | "medium" | "low"
-  distance_km: number
   osm_id: string
   tags: Record<string, string>
   inferred_signals: string[]
@@ -75,6 +78,7 @@ export interface AnalyzeResultPayload {
   blocked_segments_geojson: FeatureCollection<LineString>
   barriers_geojson: FeatureCollection<Point>
   pois_geojson: FeatureCollection<Point, PoiFeatureProperties>
+  score_grid_geojson: FeatureCollection<Polygon>
   rankings: AccessBlockerCandidate[]
   meta: {
     bbox: BBox
@@ -82,6 +86,17 @@ export interface AnalyzeResultPayload {
     calculation_method: string
     overpass_query_version: string
     profile_assumptions: string[]
+    accessibility: {
+      network_accessibility_score: number
+      opportunity_accessibility_score: number
+      general_accessibility_index: number
+      metrics: {
+        coverage_ratio: number
+        continuity_ratio: number
+        quality_ratio: number
+        blocker_pressure_ratio: number
+      }
+    }
     counts: {
       pedestrian_ways: number
       stream_ways: number

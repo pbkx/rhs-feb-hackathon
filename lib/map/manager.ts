@@ -1,25 +1,34 @@
 ﻿"use client"
 
-import type { FeatureCollection, LineString, Point } from "geojson"
+import type { FeatureCollection, LineString, Point, Polygon } from "geojson"
 import type { GeoJSONSource, Map as MapLibreMap, Marker as MapLibreMarker } from "maplibre-gl"
-import type { AnalyzeResultPayload, BBox, ReportRecord } from "@/lib/api/client"
+import type { AnalyzeResultPayload, BBox, PoiFeatureProperties, ReportRecord } from "@/lib/api/client"
 import { createMapController, type MapController, type MapType } from "@/lib/map/map-controller"
 
 const SOURCE_STREAMS = "analysis-streams-src"
 const SOURCE_ACCESSIBLE = "analysis-accessible-src"
+const SOURCE_BLOCKED = "analysis-blocked-src"
 const SOURCE_BARRIERS = "analysis-barriers-src"
+const SOURCE_SCORE_GRID = "analysis-score-grid-src"
+const SOURCE_POIS = "pois-src"
 const SOURCE_BBOX = "selection-bbox-src"
 const SOURCE_REPORTS = "reports-src"
 const SOURCE_USER_LOCATION = "user-location-src"
 const SOURCE_USER_ACCURACY = "user-accuracy-src"
 
 const LAYER_STREAMS = "analysis-streams-layer"
-const LAYER_STREAM_DIRECTION = "analysis-stream-direction-layer"
+const LAYER_SCORE_GRID_FILL = "analysis-score-grid-fill-layer"
+const LAYER_SCORE_GRID_LINE = "analysis-score-grid-line-layer"
 const LAYER_ACCESSIBLE = "analysis-accessible-layer"
+const LAYER_ACCESSIBLE_BASE = "analysis-accessible-base-layer"
+const LAYER_ACCESSIBLE_UNLOCKED = "analysis-accessible-unlocked-layer"
+const LAYER_BLOCKED = "analysis-blocked-layer"
 const LAYER_BARRIERS_GLOW = "analysis-barriers-glow-layer"
 const LAYER_BARRIERS = "analysis-barriers-layer"
 const LAYER_BARRIERS_ICON = "analysis-barriers-icon-layer"
+const LAYER_BARRIER_DELTA = "analysis-barrier-delta-layer"
 const LAYER_BARRIERS_SELECTED = "analysis-barriers-selected-layer"
+const LAYER_POIS = "pois-layer"
 const LAYER_BBOX_FILL = "selection-bbox-fill-layer"
 const LAYER_BBOX_LINE = "selection-bbox-line-layer"
 const LAYER_REPORTS = "reports-layer"
@@ -42,8 +51,26 @@ const emptyLineCollection = (): FeatureCollection<LineString> => ({
 interface SharedBarrierPreview {
   id: string
   coordinates: [number, number]
-  type: "dam" | "weir" | "waterfall"
+  type:
+    | "stairs"
+    | "raised_kerb"
+    | "steep_incline"
+    | "rough_surface"
+    | "wheelchair_no"
+    | "wheelchair_limited"
+    | "access_no"
+    | "report"
+    | "other"
   name: string
+}
+
+interface PoiClickPayload {
+  coordinates: [number, number]
+  poi_id: string | null
+  kind: string | null
+  name: string | null
+  wheelchair: string | null
+  tags_summary: Record<string, string>
 }
 
 class MapManager {
@@ -61,6 +88,7 @@ class MapManager {
   }
 
   private selectedBarrierId: string | null = null
+  private selectedUnlockedComponentId: number | null = null
   private selectedReportId: string | null = null
   private bbox: BBox | null = null
   private bboxDisplayMode: "fill" | "outline" = "fill"
@@ -81,16 +109,26 @@ class MapManager {
   private analysisData: {
     streams_geojson: FeatureCollection<LineString>
     accessible_streams_geojson: FeatureCollection<LineString>
+    blocked_segments_geojson: FeatureCollection<LineString>
     barriers_geojson: FeatureCollection<Point>
+    score_grid_geojson: FeatureCollection<Polygon>
   } = {
     streams_geojson: emptyLineCollection(),
     accessible_streams_geojson: emptyLineCollection(),
+    blocked_segments_geojson: emptyLineCollection(),
     barriers_geojson: emptyPointCollection(),
+    score_grid_geojson: { type: "FeatureCollection", features: [] },
+  }
+
+  private poisData: FeatureCollection<Point, PoiFeatureProperties> = {
+    type: "FeatureCollection",
+    features: [],
   }
 
   private reportsData: ReportRecord[] = []
 
   private barrierClickHandler: ((barrierId: string) => void) | null = null
+  private poiClickHandler: ((poi: PoiClickPayload) => void) | null = null
   private reportClickHandler: ((reportId: string) => void) | null = null
   private reportPickActive = false
   private reportPickHandler: ((coords: [number, number]) => void) | null = null
@@ -128,7 +166,10 @@ class MapManager {
   private currentSourceData(sourceId: string): FeatureCollection | null {
     if (sourceId === SOURCE_STREAMS) return this.analysisData.streams_geojson
     if (sourceId === SOURCE_ACCESSIBLE) return this.analysisData.accessible_streams_geojson
+    if (sourceId === SOURCE_BLOCKED) return this.analysisData.blocked_segments_geojson
     if (sourceId === SOURCE_BARRIERS) return this.analysisData.barriers_geojson
+    if (sourceId === SOURCE_SCORE_GRID) return this.analysisData.score_grid_geojson
+    if (sourceId === SOURCE_POIS) return this.poisData
     if (sourceId === SOURCE_BBOX) {
       return this.bbox ? this.bboxPolygonFeature(this.bbox) : { type: "FeatureCollection", features: [] }
     }
@@ -251,12 +292,14 @@ class MapManager {
       map.resize()
       this.rebuildAllLayers()
       this.bindBarrierEvents()
+      this.bindPoiEvents()
       this.emitViewChange()
     })
 
     map.on("style.load", () => {
       this.rebuildAllLayers()
       this.bindBarrierEvents()
+      this.bindPoiEvents()
     })
 
     map.on("moveend", () => {
@@ -340,7 +383,52 @@ class MapManager {
     if (!this.map || !this.map.isStyleLoaded()) return
     this.ensureGeoJsonSource(SOURCE_STREAMS, this.analysisData.streams_geojson)
     this.ensureGeoJsonSource(SOURCE_ACCESSIBLE, this.analysisData.accessible_streams_geojson)
+    this.ensureGeoJsonSource(SOURCE_BLOCKED, this.analysisData.blocked_segments_geojson)
     this.ensureGeoJsonSource(SOURCE_BARRIERS, this.analysisData.barriers_geojson)
+    this.ensureGeoJsonSource(SOURCE_SCORE_GRID, this.analysisData.score_grid_geojson)
+
+    this.ensureLayerWithSource(
+      {
+        id: LAYER_SCORE_GRID_FILL,
+        type: "fill",
+        source: SOURCE_SCORE_GRID,
+        paint: {
+          "fill-color": [
+            "interpolate",
+            ["linear"],
+            ["coalesce", ["to-number", ["get", "nas_score"]], 0],
+            0,
+            "#FEE2E2",
+            25,
+            "#FECACA",
+            50,
+            "#FDE68A",
+            70,
+            "#BBF7D0",
+            85,
+            "#86EFAC",
+            100,
+            "#4ADE80",
+          ],
+          "fill-opacity": 0.26,
+        },
+      },
+      SOURCE_SCORE_GRID
+    )
+
+    this.ensureLayerWithSource(
+      {
+        id: LAYER_SCORE_GRID_LINE,
+        type: "line",
+        source: SOURCE_SCORE_GRID,
+        paint: {
+          "line-color": "rgba(18,18,23,0.12)",
+          "line-width": 1,
+          "line-opacity": 0.45,
+        },
+      },
+      SOURCE_SCORE_GRID
+    )
 
     this.ensureLayerWithSource(
       {
@@ -348,9 +436,17 @@ class MapManager {
         type: "line",
         source: SOURCE_STREAMS,
         paint: {
-          "line-color": "#1D7FE8",
-          "line-width": 1.5,
-          "line-opacity": 0.8,
+          "line-color": [
+            "match",
+            ["get", "status"],
+            "BLOCKED",
+            "#DC2626",
+            "LIMITED",
+            "#D97706",
+            "#9CA3AF",
+          ],
+          "line-width": 2,
+          "line-opacity": 0.55,
         },
       },
       SOURCE_STREAMS
@@ -358,25 +454,17 @@ class MapManager {
 
     this.ensureLayerWithSource(
       {
-        id: LAYER_STREAM_DIRECTION,
-        type: "symbol",
-        source: SOURCE_STREAMS,
-        layout: {
-          "symbol-placement": "line",
-          "symbol-spacing": 140,
-          "text-field": "▶",
-          "text-size": 11,
-          "text-keep-upright": false,
-          "text-font": ["Open Sans Regular"],
-        },
+        id: LAYER_BLOCKED,
+        type: "line",
+        source: SOURCE_BLOCKED,
         paint: {
-          "text-color": "#0B4A99",
-          "text-opacity": 0.75,
-          "text-halo-color": "rgba(255,255,255,0.65)",
-          "text-halo-width": 0.8,
+          "line-color": "#DC2626",
+          "line-width": 3,
+          "line-opacity": 0.8,
+          "line-dasharray": [2, 1.2],
         },
       },
-      SOURCE_STREAMS
+      SOURCE_BLOCKED
     )
 
     this.ensureLayerWithSource(
@@ -385,10 +473,50 @@ class MapManager {
         type: "line",
         source: SOURCE_ACCESSIBLE,
         paint: {
-          "line-color": "#34C759",
-          "line-width": 3,
-          "line-opacity": 0.85,
+          "line-color": [
+            "interpolate",
+            ["linear"],
+            ["coalesce", ["to-number", ["get", "quality_score"]], 0.2],
+            0,
+            "#F97316",
+            0.5,
+            "#FACC15",
+            1,
+            "#22C55E",
+          ],
+          "line-width": 2.3,
+          "line-opacity": 0.76,
         },
+      },
+      SOURCE_ACCESSIBLE
+    )
+
+    this.ensureLayerWithSource(
+      {
+        id: LAYER_ACCESSIBLE_BASE,
+        type: "line",
+        source: SOURCE_ACCESSIBLE,
+        paint: {
+          "line-color": "#2563EB",
+          "line-width": 4.2,
+          "line-opacity": 0.72,
+        },
+        filter: ["==", ["get", "is_base_component"], true],
+      },
+      SOURCE_ACCESSIBLE
+    )
+
+    this.ensureLayerWithSource(
+      {
+        id: LAYER_ACCESSIBLE_UNLOCKED,
+        type: "line",
+        source: SOURCE_ACCESSIBLE,
+        paint: {
+          "line-color": "#10B981",
+          "line-width": 4.6,
+          "line-opacity": 0.88,
+        },
+        filter: ["==", ["get", "component_id"], -1],
       },
       SOURCE_ACCESSIBLE
     )
@@ -402,14 +530,14 @@ class MapManager {
           "circle-radius": [
             "interpolate",
             ["linear"],
-            ["coalesce", ["to-number", ["get", "gain_km"]], 0],
+            ["coalesce", ["to-number", ["get", "unlock_m"]], 0],
             0,
             10,
-            1,
+            500,
             14,
-            5,
+            1500,
             18,
-            20,
+            4000,
             24,
           ],
           "circle-color": "#007AFF",
@@ -429,25 +557,35 @@ class MapManager {
           "circle-radius": [
             "interpolate",
             ["linear"],
-            ["coalesce", ["to-number", ["get", "gain_km"]], 0],
+            ["coalesce", ["to-number", ["get", "unlock_m"]], 0],
             0,
             6,
-            1,
+            500,
             8,
-            5,
+            1500,
             11,
-            20,
+            4000,
             15,
           ],
           "circle-color": [
             "match",
             ["get", "type"],
-            "dam",
+            "stairs",
             "#FF6B35",
-            "weir",
+            "wheelchair_no",
+            "#DC2626",
+            "access_no",
+            "#DC2626",
+            "raised_kerb",
             "#007AFF",
-            "waterfall",
-            "#AF52DE",
+            "steep_incline",
+            "#A855F7",
+            "rough_surface",
+            "#F59E0B",
+            "wheelchair_limited",
+            "#F59E0B",
+            "report",
+            "#06B6D4",
             "#FF6B35",
           ],
           "circle-stroke-width": 2,
@@ -466,13 +604,23 @@ class MapManager {
           "text-field": [
             "match",
             ["get", "type"],
-            "dam",
+            "stairs",
+            "≡",
+            "raised_kerb",
+            "┻",
+            "steep_incline",
+            "⛰",
+            "rough_surface",
+            "≈",
+            "wheelchair_no",
+            "✕",
+            "wheelchair_limited",
+            "!",
+            "access_no",
+            "⛔",
+            "report",
+            "⚑",
             "◆",
-            "weir",
-            "△",
-            "waterfall",
-            "✦",
-            "●",
           ],
           "text-size": 10,
           "text-allow-overlap": true,
@@ -481,6 +629,32 @@ class MapManager {
           "text-color": "#FFFFFF",
           "text-opacity": 0.95,
         },
+      },
+      SOURCE_BARRIERS
+    )
+
+    this.ensureLayerWithSource(
+      {
+        id: LAYER_BARRIER_DELTA,
+        type: "symbol",
+        source: SOURCE_BARRIERS,
+        layout: {
+          "text-field": [
+            "concat",
+            "Δ ",
+            ["to-string", ["round", ["*", ["get", "delta_general_points"], 10]]],
+            "/10",
+          ],
+          "text-size": 11,
+          "text-offset": [0, 1.4],
+          "text-allow-overlap": true,
+        },
+        paint: {
+          "text-color": "#111827",
+          "text-halo-color": "rgba(255,255,255,0.95)",
+          "text-halo-width": 1.2,
+        },
+        filter: ["==", ["get", "barrier_id"], "__none__"],
       },
       SOURCE_BARRIERS
     )
@@ -502,6 +676,63 @@ class MapManager {
       SOURCE_BARRIERS
     )
 
+  }
+
+  private ensurePoisLayer() {
+    if (!this.map || !this.map.isStyleLoaded()) return
+    this.ensureGeoJsonSource(SOURCE_POIS, this.poisData)
+
+    this.ensureLayerWithSource(
+      {
+        id: LAYER_POIS,
+        type: "circle",
+        source: SOURCE_POIS,
+        paint: {
+          "circle-radius": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            5,
+            3.2,
+            9,
+            4.6,
+            13,
+            6.4,
+          ],
+          "circle-color": [
+            "match",
+            ["get", "theme"],
+            "healthcare",
+            "#0EA5E9",
+            "essential",
+            "#14B8A6",
+            "#6B7280",
+          ],
+          "circle-opacity": 0.88,
+          "circle-stroke-width": [
+            "case",
+            [
+              "any",
+              ["==", ["get", "wheelchair"], "yes"],
+              ["==", ["get", "toilets_wheelchair"], "yes"],
+            ],
+            2.1,
+            1.2,
+          ],
+          "circle-stroke-color": [
+            "case",
+            [
+              "any",
+              ["==", ["get", "wheelchair"], "yes"],
+              ["==", ["get", "toilets_wheelchair"], "yes"],
+            ],
+            "#065F46",
+            "#FFFFFF",
+          ],
+        },
+      },
+      SOURCE_POIS
+    )
   }
 
   private bboxPolygonFeature(bbox: BBox): FeatureCollection {
@@ -771,10 +1002,16 @@ class MapManager {
   }
 
   private normalizeBarrierType(type: string) {
-    if (type === "weir" || type === "waterfall" || type === "dam") {
-      return type
-    }
-    return "dam"
+    const value = type.trim().toLowerCase()
+    if (value === "stairs") return "stairs"
+    if (value === "raised_kerb" || value === "kerb") return "raised_kerb"
+    if (value === "steep_incline") return "steep_incline"
+    if (value === "rough_surface") return "rough_surface"
+    if (value === "wheelchair_no") return "wheelchair_no"
+    if (value === "wheelchair_limited") return "wheelchair_limited"
+    if (value === "access_no") return "access_no"
+    if (value === "report") return "report"
+    return "other"
   }
 
   private playBarrierSelectionAnimation(barrierId: string) {
@@ -946,7 +1183,7 @@ class MapManager {
       const barrierIdRaw = props.barrier_id
       if (typeof barrierIdRaw !== "string" || barrierIdRaw.trim().length === 0) continue
       const barrierId = barrierIdRaw.trim()
-      const barrierType = typeof props.type === "string" ? this.normalizeBarrierType(props.type) : "dam"
+      const barrierType = typeof props.type === "string" ? this.normalizeBarrierType(props.type) : "other"
       const name = typeof props.name === "string" && props.name.trim().length > 0 ? props.name : barrierId
       const element = this.createBarrierPinElement(barrierId, barrierType, name)
 
@@ -1092,11 +1329,17 @@ class MapManager {
     }
 
     setVisibility(LAYER_STREAMS, this.layerVisibility.streams)
-    setVisibility(LAYER_STREAM_DIRECTION, this.layerVisibility.streams)
+    setVisibility(LAYER_SCORE_GRID_FILL, this.layerVisibility.streams)
+    setVisibility(LAYER_SCORE_GRID_LINE, this.layerVisibility.streams)
+    setVisibility(LAYER_BLOCKED, this.layerVisibility.streams)
+    setVisibility(LAYER_POIS, true)
     setVisibility(LAYER_ACCESSIBLE, this.layerVisibility.accessible)
+    setVisibility(LAYER_ACCESSIBLE_BASE, this.layerVisibility.accessible)
+    setVisibility(LAYER_ACCESSIBLE_UNLOCKED, this.layerVisibility.accessible)
     setVisibility(LAYER_BARRIERS, this.layerVisibility.barriers && useNativeBarrierLayers)
     setVisibility(LAYER_BARRIERS_ICON, this.layerVisibility.barriers && useNativeBarrierLayers)
     setVisibility(LAYER_BARRIERS_GLOW, this.layerVisibility.barriers && useNativeBarrierLayers)
+    setVisibility(LAYER_BARRIER_DELTA, this.layerVisibility.barriers && useNativeBarrierLayers)
     setVisibility(LAYER_BARRIERS_SELECTED, this.layerVisibility.barriers && useNativeBarrierLayers)
     setVisibility(LAYER_REPORTS, this.layerVisibility.reports && useNativeReportLayers)
     this.syncBarrierMarkerVisibility()
@@ -1111,10 +1354,29 @@ class MapManager {
         ? ["==", ["get", "barrier_id"], this.selectedBarrierId]
         : ["==", ["get", "barrier_id"], "__none__"]
     )
+    if (this.map.getLayer(LAYER_BARRIER_DELTA)) {
+      this.map.setFilter(
+        LAYER_BARRIER_DELTA,
+        this.selectedBarrierId
+          ? ["==", ["get", "barrier_id"], this.selectedBarrierId]
+          : ["==", ["get", "barrier_id"], "__none__"]
+      )
+    }
+  }
+
+  private applyUnlockedComponentFilter() {
+    if (!this.map || !this.map.isStyleLoaded() || !this.map.getLayer(LAYER_ACCESSIBLE_UNLOCKED)) return
+    this.map.setFilter(
+      LAYER_ACCESSIBLE_UNLOCKED,
+      typeof this.selectedUnlockedComponentId === "number"
+        ? ["==", ["get", "component_id"], this.selectedUnlockedComponentId]
+        : ["==", ["get", "component_id"], -1]
+    )
   }
 
   private rebuildAllLayers() {
     if (!this.map || !this.map.isStyleLoaded()) return
+    this.ensurePoisLayer()
     this.ensureAnalysisLayers()
     this.ensureSelectionLayers()
     this.ensureReportsLayer()
@@ -1125,6 +1387,20 @@ class MapManager {
     }
     
     // Move barrier layers to top for better visibility
+    if (this.map.getLayer(LAYER_ACCESSIBLE_UNLOCKED)) {
+      try {
+        this.map.moveLayer(LAYER_ACCESSIBLE_UNLOCKED)
+      } catch {
+        // Layer already on top or error
+      }
+    }
+    if (this.map.getLayer(LAYER_POIS)) {
+      try {
+        this.map.moveLayer(LAYER_POIS)
+      } catch {
+        // Layer already on top or error
+      }
+    }
     if (this.map.getLayer(LAYER_BARRIERS)) {
       try {
         this.map.moveLayer(LAYER_BARRIERS)
@@ -1142,6 +1418,8 @@ class MapManager {
     
     this.applyLayerVisibility()
     this.applySelectedBarrierFilter()
+    this.applyUnlockedComponentFilter()
+    this.bindPoiEvents()
     void this.renderBarrierMarkers()
     void this.renderReportMarkers()
     if (this.reportMarker) {
@@ -1189,6 +1467,43 @@ class MapManager {
     this.updateCursor()
   }
 
+  private handlePoiClick = (event: any) => {
+    if (this.reportPickActive) return
+    const feature = event.features?.[0]
+    if (!feature || feature.geometry?.type !== "Point") return
+    const coords = feature.geometry.coordinates
+    if (!Array.isArray(coords) || coords.length < 2) return
+    const props = (feature.properties ?? {}) as Record<string, unknown>
+    const tagsSummaryRaw = props.tags_summary
+    const tagsSummary =
+      tagsSummaryRaw && typeof tagsSummaryRaw === "object" && !Array.isArray(tagsSummaryRaw)
+        ? Object.fromEntries(
+            Object.entries(tagsSummaryRaw as Record<string, unknown>).filter(
+              (entry): entry is [string, string] => typeof entry[1] === "string"
+            )
+          )
+        : {}
+
+    this.poiClickHandler?.({
+      coordinates: [coords[0], coords[1]],
+      poi_id: typeof props.poi_id === "string" ? props.poi_id : null,
+      kind: typeof props.kind === "string" ? props.kind : null,
+      name: typeof props.name === "string" ? props.name : null,
+      wheelchair: typeof props.wheelchair === "string" ? props.wheelchair : null,
+      tags_summary: tagsSummary,
+    })
+  }
+
+  private handlePoiMouseEnter = () => {
+    if (!this.map) return
+    if (this.reportPickActive) return
+    this.map.getCanvas().style.cursor = "pointer"
+  }
+
+  private handlePoiMouseLeave = () => {
+    this.updateCursor()
+  }
+
   private bindBarrierEvents() {
     if (!this.map || !this.map.isStyleLoaded()) return
     if (!this.map.getLayer(LAYER_BARRIERS)) return
@@ -1200,6 +1515,19 @@ class MapManager {
     this.map.on("click", LAYER_BARRIERS, this.handleBarrierClick)
     this.map.on("mouseenter", LAYER_BARRIERS, this.handleBarrierMouseEnter)
     this.map.on("mouseleave", LAYER_BARRIERS, this.handleBarrierMouseLeave)
+  }
+
+  private bindPoiEvents() {
+    if (!this.map || !this.map.isStyleLoaded()) return
+    if (!this.map.getLayer(LAYER_POIS)) return
+
+    this.map.off("click", LAYER_POIS, this.handlePoiClick)
+    this.map.off("mouseenter", LAYER_POIS, this.handlePoiMouseEnter)
+    this.map.off("mouseleave", LAYER_POIS, this.handlePoiMouseLeave)
+
+    this.map.on("click", LAYER_POIS, this.handlePoiClick)
+    this.map.on("mouseenter", LAYER_POIS, this.handlePoiMouseEnter)
+    this.map.on("mouseleave", LAYER_POIS, this.handlePoiMouseLeave)
   }
 
   async setStyle(type: MapType): Promise<boolean> {
@@ -1247,8 +1575,10 @@ class MapManager {
 
   async setSelectedBarrier(barrierId: string | null) {
     this.selectedBarrierId = barrierId
+    this.selectedUnlockedComponentId = this.findUnlockedComponentForBarrier(barrierId)
     await this.initialize()
     this.applySelectedBarrierFilter()
+    this.applyUnlockedComponentFilter()
     this.syncBarrierMarkerSelection()
     if (barrierId) {
       this.playBarrierSelectionAnimation(barrierId)
@@ -1262,7 +1592,9 @@ class MapManager {
   async focusBarrier(barrierId: string, center: [number, number], zoom = 13.5) {
     await this.initialize()
     this.selectedBarrierId = barrierId
+    this.selectedUnlockedComponentId = this.findUnlockedComponentForBarrier(barrierId)
     this.applySelectedBarrierFilter()
+    this.applyUnlockedComponentFilter()
     this.syncBarrierMarkerSelection()
     await this.flyTo({ center, zoom })
     this.playBarrierSelectionAnimation(barrierId)
@@ -1283,7 +1615,7 @@ class MapManager {
           type:
             typeof preview.type === "string"
               ? this.normalizeBarrierType(preview.type)
-              : "dam",
+              : "other",
           name:
             typeof preview.name === "string" && preview.name.trim().length > 0
               ? preview.name.trim()
@@ -1375,17 +1707,49 @@ class MapManager {
     return [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()]
   }
 
+  private findUnlockedComponentForBarrier(barrierId: string | null): number | null {
+    if (!barrierId) return null
+    for (const feature of this.analysisData.barriers_geojson.features) {
+      if (feature.geometry?.type !== "Point") continue
+      const props = (feature.properties ?? {}) as Record<string, unknown>
+      if (props.barrier_id !== barrierId) continue
+      const componentId = props.unlocked_component_id
+      if (typeof componentId === "number" && Number.isFinite(componentId)) {
+        return componentId
+      }
+      return null
+    }
+    return null
+  }
+
+  async setPoisData(pois: FeatureCollection<Point, PoiFeatureProperties>) {
+    this.poisData = pois
+    await this.initialize()
+    this.ensurePoisLayer()
+    this.applyLayerVisibility()
+    this.bindPoiEvents()
+  }
+
   async setAnalysisData(payload: AnalyzeResultPayload) {
     this.analysisData = {
       ...this.analysisData,
       streams_geojson: payload.streams_geojson,
       accessible_streams_geojson: payload.accessible_streams_geojson,
+      blocked_segments_geojson: payload.blocked_segments_geojson,
       barriers_geojson: payload.barriers_geojson,
+      score_grid_geojson: payload.score_grid_geojson,
     }
+    if (payload.pois_geojson.features.length > 0) {
+      this.poisData = payload.pois_geojson
+    }
+    this.selectedUnlockedComponentId = this.findUnlockedComponentForBarrier(this.selectedBarrierId)
     await this.initialize()
+    this.ensurePoisLayer()
     this.ensureAnalysisLayers()
     this.applyLayerVisibility()
+    this.applyUnlockedComponentFilter()
     this.bindBarrierEvents()
+    this.bindPoiEvents()
     await this.renderBarrierMarkers()
   }
 
@@ -1405,6 +1769,10 @@ class MapManager {
 
   setBarrierClickHandler(handler: ((barrierId: string) => void) | null) {
     this.barrierClickHandler = handler
+  }
+
+  setPoiClickHandler(handler: ((poi: PoiClickPayload) => void) | null) {
+    this.poiClickHandler = handler
   }
 
   setReportClickHandler(handler: ((reportId: string) => void) | null) {
@@ -1440,4 +1808,3 @@ class MapManager {
 export const mapManager = new MapManager()
 
 export type { MapType }
-

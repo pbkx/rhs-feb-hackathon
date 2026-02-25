@@ -5,7 +5,23 @@ import { toast } from "sonner"
 import { useAppState, type MockBarrier } from "@/lib/app-context"
 import { candidatesFromAnalyzeResult } from "@/lib/barrier-candidate"
 import { mapManager, type MapType } from "@/lib/map/manager"
-import { getReports, type ReportRecord } from "@/lib/api/client"
+import { getPois, getReports, type ReportRecord } from "@/lib/api/client"
+import { bboxFromCenterRadiusKm } from "@/lib/geo-radius"
+
+function normalizeSharedBarrierType(value: unknown): MockBarrier["type"] {
+  if (value === "stairs") return "stairs"
+  if (value === "raised_kerb" || value === "kerb") return "raised_kerb"
+  if (value === "steep_incline") return "steep_incline"
+  if (value === "rough_surface") return "rough_surface"
+  if (value === "wheelchair_no") return "wheelchair_no"
+  if (value === "wheelchair_limited") return "wheelchair_limited"
+  if (value === "access_no") return "access_no"
+  if (value === "report") return "report"
+  if (value === "weir") return "weir"
+  if (value === "waterfall") return "waterfall"
+  if (value === "dam") return "dam"
+  return "other"
+}
 
 function parseSharedBarrierPayload(raw: string): MockBarrier | null {
   try {
@@ -24,7 +40,7 @@ function parseSharedBarrierPayload(raw: string): MockBarrier | null {
     const lng = Number(source.lng)
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
 
-    const type = source.type === "weir" || source.type === "waterfall" ? source.type : "dam"
+    const type = normalizeSharedBarrierType(source.type)
     const confidence =
       source.confidence === "high" || source.confidence === "medium" || source.confidence === "low"
         ? source.confidence
@@ -48,9 +64,37 @@ function parseSharedBarrierPayload(raw: string): MockBarrier | null {
       upstreamBlocked: Number.isFinite(Number(source.upstreamBlocked)) ? Number(source.upstreamBlocked) : 0,
       confidence,
       distance: Number.isFinite(Number(source.distance)) ? Number(source.distance) : 0,
+      deltaNas: Number.isFinite(Number(source.deltaNas)) ? Number(source.deltaNas) : 0,
+      deltaOas: Number.isFinite(Number(source.deltaOas)) ? Number(source.deltaOas) : 0,
+      deltaGeneral: Number.isFinite(Number(source.deltaGeneral)) ? Number(source.deltaGeneral) : 0,
+      baselineIndex: Number.isFinite(Number(source.baselineIndex)) ? Number(source.baselineIndex) : 0,
+      postFixIndex: Number.isFinite(Number(source.postFixIndex)) ? Number(source.postFixIndex) : 0,
+      unlockedPoiCount: Number.isFinite(Number(source.unlockedPoiCount))
+        ? Number(source.unlockedPoiCount)
+        : 0,
+      unlockedDestinationCounts:
+        source.unlockedDestinationCounts &&
+        typeof source.unlockedDestinationCounts === "object" &&
+        !Array.isArray(source.unlockedDestinationCounts)
+          ? Object.fromEntries(
+              Object.entries(source.unlockedDestinationCounts as Record<string, unknown>).filter(
+                (entry): entry is [string, number] => typeof entry[1] === "number"
+              )
+            )
+          : {},
+      unlockedComponentId:
+        typeof source.unlockedComponentId === "number" && Number.isFinite(source.unlockedComponentId)
+          ? source.unlockedComponentId
+          : null,
+      score: Number.isFinite(Number(source.score)) ? Number(source.score) : 0,
       osmId: typeof source.osmId === "string" && source.osmId.trim().length > 0 ? source.osmId : id,
       tags,
       inferredSignals,
+      reason: typeof source.reason === "string" && source.reason.trim().length > 0 ? source.reason : undefined,
+      locationLabel:
+        typeof source.locationLabel === "string" && source.locationLabel.trim().length > 0
+          ? source.locationLabel
+          : undefined,
       calculationMethod:
         typeof source.calculationMethod === "string" && source.calculationMethod.trim().length > 0
           ? source.calculationMethod
@@ -61,6 +105,10 @@ function parseSharedBarrierPayload(raw: string): MockBarrier | null {
   } catch {
     return null
   }
+}
+
+function bboxAreaDegrees(bbox: [number, number, number, number]) {
+  return Math.abs(bbox[2] - bbox[0]) * Math.abs(bbox[3] - bbox[1])
 }
 
 export function MapContainer() {
@@ -76,6 +124,14 @@ export function MapContainer() {
     reportLocationMode,
     analysisPayload,
     nearbyReports,
+    setAnalysisAnchor,
+    setAnalysisAnchorPoiId,
+    setAnalysisJobId,
+    setAnalysisPayload,
+    setAnalysisStatus,
+    setBbox,
+    setCandidates,
+    setCurrentStep,
     updateReportDraft,
     setSelectedBarrier,
     setSelectedReport,
@@ -225,6 +281,25 @@ export function MapContainer() {
   }, [analysisPayload])
 
   useEffect(() => {
+    let timeout: number | null = null
+    return mapManager.subscribeViewChange((bbox) => {
+      if (timeout) window.clearTimeout(timeout)
+      timeout = window.setTimeout(async () => {
+        if (bboxAreaDegrees(bbox) > 0.45) {
+          await mapManager.setPoisData({ type: "FeatureCollection", features: [] })
+          return
+        }
+        try {
+          const response = await getPois(bbox)
+          await mapManager.setPoisData(response.pois_geojson)
+        } catch (error) {
+          console.warn("[map] failed to refresh viewport POIs", error)
+        }
+      }, 420)
+    })
+  }, [])
+
+  useEffect(() => {
     if (!analysisPayload) {
       void mapManager.setReportsData([])
       setNearbyReports([])
@@ -349,6 +424,44 @@ export function MapContainer() {
       mapManager.setBarrierClickHandler(null)
     }
   }, [activeMode, candidateIndex, currentView, pushView, resetNav, setActiveMode, setSelectedBarrier])
+
+  useEffect(() => {
+    mapManager.setPoiClickHandler((poi) => {
+      const analysisBbox = bboxFromCenterRadiusKm(poi.coordinates, 20)
+      setAnalysisAnchor(poi.coordinates)
+      setAnalysisAnchorPoiId(poi.poi_id)
+      setBbox(analysisBbox)
+      setAnalysisJobId(null)
+      setAnalysisPayload(null)
+      setCandidates([])
+      setSelectedBarrier(null)
+      setAnalysisStatus("loading")
+      setCurrentStep(0)
+      setActiveMode("analyze")
+      void mapManager.setBBoxDisplayMode("outline")
+      void mapManager.setBBox(analysisBbox)
+      void mapManager.flyTo({ bbox: analysisBbox, padding: 52 })
+      window.setTimeout(() => {
+        resetNav("AnalyzeLoading")
+      }, 0)
+    })
+
+    return () => {
+      mapManager.setPoiClickHandler(null)
+    }
+  }, [
+    resetNav,
+    setActiveMode,
+    setAnalysisAnchor,
+    setAnalysisAnchorPoiId,
+    setAnalysisJobId,
+    setAnalysisPayload,
+    setAnalysisStatus,
+    setBbox,
+    setCandidates,
+    setCurrentStep,
+    setSelectedBarrier,
+  ])
 
   useEffect(() => {
     mapManager.setReportClickHandler((reportId) => {

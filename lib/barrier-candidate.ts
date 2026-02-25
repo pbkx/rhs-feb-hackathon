@@ -11,9 +11,18 @@ function toFiniteNumber(value: unknown, fallback = 0) {
 
 function normalizeBarrierType(value: unknown): MockBarrier["type"] {
   const type = typeof value === "string" ? value.toLowerCase() : ""
-  if (type.includes("weir")) return "weir"
-  if (type.includes("waterfall")) return "waterfall"
-  return "dam"
+  if (type === "stairs") return "stairs"
+  if (type === "raised_kerb" || type === "kerb") return "raised_kerb"
+  if (type === "steep_incline") return "steep_incline"
+  if (type === "rough_surface") return "rough_surface"
+  if (type === "wheelchair_no") return "wheelchair_no"
+  if (type === "wheelchair_limited") return "wheelchair_limited"
+  if (type === "access_no") return "access_no"
+  if (type === "report") return "report"
+  if (type === "weir") return "weir"
+  if (type === "waterfall") return "waterfall"
+  if (type === "dam") return "dam"
+  return "other"
 }
 
 function normalizeConfidence(value: unknown): MockBarrier["confidence"] {
@@ -72,17 +81,35 @@ function rankingToCandidate(
   ranking: AnalyzeResultPayload["rankings"][number],
   calculationMethod: string
 ): MockBarrier {
+  const unlockMeters = toFiniteNumber(ranking.unlock_m, toFiniteNumber((ranking as any).gain_km, 0) * 1000)
+  const blockedMeters = toFiniteNumber(ranking.blocked_m, toFiniteNumber((ranking as any).blocked_km, 0) * 1000)
+  const distanceMeters = toFiniteNumber(ranking.distance_m, toFiniteNumber((ranking as any).distance_km, 0) * 1000)
+
   return {
     id: ranking.barrier_id,
     name: ranking.name,
-    type: ranking.type,
-    gain: Number(ranking.gain_km.toFixed(1)),
-    upstreamBlocked: Number(ranking.blocked_km.toFixed(1)),
+    type: normalizeBarrierType((ranking as { type?: string; blocker_type?: string }).type ?? ranking.blocker_type),
+    gain: Number(unlockMeters.toFixed(0)),
+    upstreamBlocked: Number(blockedMeters.toFixed(0)),
     confidence: ranking.confidence,
-    distance: Number(ranking.distance_km.toFixed(1)),
+    distance: Number(distanceMeters.toFixed(0)),
+    deltaNas: Number(toFiniteNumber(ranking.delta_nas_points).toFixed(2)),
+    deltaOas: Number(toFiniteNumber(ranking.delta_oas_points).toFixed(2)),
+    deltaGeneral: Number(toFiniteNumber(ranking.delta_general_points).toFixed(2)),
+    baselineIndex: Number(toFiniteNumber(ranking.baseline_general_index).toFixed(2)),
+    postFixIndex: Number(toFiniteNumber(ranking.post_fix_general_index).toFixed(2)),
+    unlockedPoiCount: Number(toFiniteNumber(ranking.unlocked_poi_count)),
+    unlockedDestinationCounts: { ...(ranking.unlocked_destination_counts ?? {}) },
+    unlockedComponentId:
+      typeof ranking.unlocked_component_id === "number" && Number.isFinite(ranking.unlocked_component_id)
+        ? ranking.unlocked_component_id
+        : null,
+    score: Number(toFiniteNumber(ranking.score).toFixed(3)),
     osmId: ranking.osm_id,
     tags: ranking.tags,
     inferredSignals: normalizeInferredSignals(ranking.inferred_signals),
+    reason: ranking.reason,
+    locationLabel: ranking.location_label,
     calculationMethod,
     lat: ranking.lat,
     lng: ranking.lon,
@@ -119,11 +146,10 @@ export function applyReportConfidenceSignals(
     }
 
     let confidence = base.confidence
-
     if (effectiveReports >= 2) {
-      confidence = "low"
-    } else if (effectiveReports >= 1) {
-      confidence = confidence === "low" ? "low" : "medium"
+      confidence = "high"
+    } else if (effectiveReports >= 1 && confidence === "low") {
+      confidence = "medium"
     }
     inferredSignals.push(`Reported by ${effectiveReports} users.`)
 
@@ -167,19 +193,30 @@ export function candidatesFromAnalyzeResult(
       continue
     }
 
-    const gainKm = toFiniteNumber(props.gain_km, 0)
-    const distanceKm = haversineKm(center, [coordinates[0], coordinates[1]])
+    const gainMeters = toFiniteNumber(props.unlock_m, toFiniteNumber(props.gain_km, 0) * 1000)
+    const blockedMeters = toFiniteNumber(props.blocked_m, toFiniteNumber(props.blocked_km, 0) * 1000)
+    const distanceMeters = haversineKm(center, [coordinates[0], coordinates[1]]) * 1000
+
     byId.set(barrierId, {
       id: barrierId,
       name:
         typeof props.name === "string" && props.name.trim().length > 0
           ? props.name
-          : `Barrier ${byId.size + 1}`,
+          : `Blocker ${byId.size + 1}`,
       type: normalizeBarrierType(props.type),
-      gain: Number(gainKm.toFixed(1)),
-      upstreamBlocked: Number(gainKm.toFixed(1)),
+      gain: Number(gainMeters.toFixed(0)),
+      upstreamBlocked: Number(blockedMeters.toFixed(0)),
       confidence: normalizeConfidence(props.confidence),
-      distance: Number(distanceKm.toFixed(1)),
+      distance: Number(distanceMeters.toFixed(0)),
+      deltaNas: Number(toFiniteNumber(props.delta_nas_points).toFixed(2)),
+      deltaOas: Number(toFiniteNumber(props.delta_oas_points).toFixed(2)),
+      deltaGeneral: Number(toFiniteNumber(props.delta_general_points).toFixed(2)),
+      baselineIndex: Number(toFiniteNumber(props.baseline_general_index).toFixed(2)),
+      postFixIndex: Number(toFiniteNumber(props.post_fix_general_index).toFixed(2)),
+      unlockedPoiCount: Number(toFiniteNumber(props.unlocked_poi_count)),
+      unlockedDestinationCounts: {},
+      unlockedComponentId: null,
+      score: Number(toFiniteNumber(props.score).toFixed(3)),
       osmId: typeof props.osm_id === "string" ? props.osm_id : barrierId,
       tags: {},
       inferredSignals: [EXPLICIT_OSM_SIGNAL],

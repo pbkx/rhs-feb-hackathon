@@ -1,4 +1,11 @@
-import type { Feature, FeatureCollection, GeoJsonProperties, LineString, Point } from "geojson"
+import type {
+  Feature,
+  FeatureCollection,
+  GeoJsonProperties,
+  LineString,
+  Point,
+  Polygon,
+} from "geojson"
 import { bboxCenter, haversineMeters } from "../lib/geo"
 import type {
   AccessBlockerCandidate,
@@ -143,6 +150,7 @@ interface EdgeClassification {
   blocker_type: AccessBlockerType | null
   confidence: Confidence
   inferred_signals: string[]
+  quality_score: number
 }
 
 interface PedestrianEdge {
@@ -152,6 +160,7 @@ interface PedestrianEdge {
   to: number
   from_coord: Coord
   to_coord: Coord
+  mid_coord: Coord
   length_m: number
   tags: Record<string, string>
   classification: EdgeClassification
@@ -160,11 +169,8 @@ interface PedestrianEdge {
 
 interface ComponentStats {
   length_m: number
-  healthcare_score: number
-  essentials_score: number
-  healthcare_counts: Record<string, number>
-  essentials_counts: Record<string, number>
   poi_count: number
+  destination_counts: Record<string, number>
 }
 
 interface CandidateInternal {
@@ -173,14 +179,18 @@ interface CandidateInternal {
   blocker_type: AccessBlockerType
   name: string
   score: number
-  unlock_km: number
-  blocked_km: number
-  unlocked_healthcare_score: number
-  unlocked_essentials_score: number
-  unlocked_healthcare_counts: Record<string, number>
-  unlocked_essentials_counts: Record<string, number>
+  unlock_m: number
+  blocked_m: number
+  distance_m: number
+  delta_nas_points: number
+  delta_oas_points: number
+  delta_general_points: number
+  baseline_general_index: number
+  post_fix_general_index: number
+  unlocked_poi_count: number
+  unlocked_destination_counts: Record<string, number>
+  unlocked_component_id: number | null
   confidence: Confidence
-  distance_km: number
   osm_id: string
   tags: Record<string, string>
   inferred_signals: string[]
@@ -192,7 +202,6 @@ interface CandidateInternal {
   location_label: string
   lat: number
   lon: number
-  blocked_length_m: number
 }
 
 interface AnalysisOptions {
@@ -209,6 +218,14 @@ interface ReportSignal {
   coordinates: Coord
 }
 
+interface AccessibilityScores {
+  coverage_ratio: number
+  continuity_ratio: number
+  quality_ratio: number
+  blocker_pressure_ratio: number
+  network_accessibility_score: number
+}
+
 function asTags(tags?: Record<string, string>) {
   return tags ?? {}
 }
@@ -216,10 +233,7 @@ function asTags(tags?: Record<string, string>) {
 function lineFeature(coords: Coord[], properties: GeoJsonProperties): Feature<LineString> {
   return {
     type: "Feature",
-    geometry: {
-      type: "LineString",
-      coordinates: coords,
-    },
+    geometry: { type: "LineString", coordinates: coords },
     properties,
   }
 }
@@ -227,10 +241,15 @@ function lineFeature(coords: Coord[], properties: GeoJsonProperties): Feature<Li
 function pointFeature(point: Coord, properties: GeoJsonProperties): Feature<Point> {
   return {
     type: "Feature",
-    geometry: {
-      type: "Point",
-      coordinates: point,
-    },
+    geometry: { type: "Point", coordinates: point },
+    properties,
+  }
+}
+
+function polygonFeature(coords: Coord[], properties: GeoJsonProperties): Feature<Polygon> {
+  return {
+    type: "Feature",
+    geometry: { type: "Polygon", coordinates: [coords] },
     properties,
   }
 }
@@ -317,15 +336,15 @@ function blockerFixCostPenalty(type: AccessBlockerType) {
     case "access_no":
       return 1.1
     case "wheelchair_no":
-      return 0.9
+      return 0.95
     case "raised_kerb":
-      return 0.6
+      return 0.55
     case "steep_incline":
-      return 0.7
+      return 0.75
     case "rough_surface":
-      return 0.5
-    case "wheelchair_limited":
       return 0.45
+    case "wheelchair_limited":
+      return 0.4
     case "report":
       return 0.55
     default:
@@ -357,6 +376,7 @@ function classifyPedestrianEdgeAccessibility(
       blocker_type: "stairs",
       confidence: "high",
       inferred_signals: ["Tagged highway=steps, not wheelchair-passable."],
+      quality_score: 0,
     }
   }
   if (tags.wheelchair === "no") {
@@ -365,6 +385,7 @@ function classifyPedestrianEdgeAccessibility(
       blocker_type: "wheelchair_no",
       confidence: "high",
       inferred_signals: ["Tagged wheelchair=no."],
+      quality_score: 0,
     }
   }
   if (BLOCKED_ACCESS_VALUES.has(tags.access ?? "") || BLOCKED_ACCESS_VALUES.has(tags.foot ?? "")) {
@@ -373,6 +394,7 @@ function classifyPedestrianEdgeAccessibility(
       blocker_type: "access_no",
       confidence: "high",
       inferred_signals: ["Tagged access/foot restriction blocks pedestrian use."],
+      quality_score: 0,
     }
   }
   if (hasRaisedKerbEndpoint) {
@@ -381,14 +403,17 @@ function classifyPedestrianEdgeAccessibility(
       blocker_type: "raised_kerb",
       confidence: "high",
       inferred_signals: ["Connected to kerb=raised crossing node."],
+      quality_score: 0,
     }
   }
+
   if (tags.wheelchair === "limited") {
     return {
       status: "LIMITED",
       blocker_type: "wheelchair_limited",
       confidence: "high",
       inferred_signals: ["Tagged wheelchair=limited."],
+      quality_score: 0.62,
     }
   }
   const inclinePct = parseInclineTag(tags.incline)
@@ -398,6 +423,7 @@ function classifyPedestrianEdgeAccessibility(
       blocker_type: "steep_incline",
       confidence: "medium",
       inferred_signals: [`Incline tag suggests ~${inclinePct.toFixed(1)}% slope.`],
+      quality_score: 0.55,
     }
   }
   if (typeof tags.surface === "string" && ROUGH_SURFACES.has(tags.surface)) {
@@ -406,6 +432,7 @@ function classifyPedestrianEdgeAccessibility(
       blocker_type: "rough_surface",
       confidence: "medium",
       inferred_signals: [`Surface tagged ${tags.surface}.`],
+      quality_score: 0.58,
     }
   }
   if (typeof tags.smoothness === "string" && POOR_SMOOTHNESS.has(tags.smoothness)) {
@@ -414,6 +441,7 @@ function classifyPedestrianEdgeAccessibility(
       blocker_type: "rough_surface",
       confidence: "medium",
       inferred_signals: [`Smoothness tagged ${tags.smoothness}.`],
+      quality_score: 0.52,
     }
   }
   return {
@@ -421,28 +449,12 @@ function classifyPedestrianEdgeAccessibility(
     blocker_type: null,
     confidence: "medium",
     inferred_signals: [],
+    quality_score: 1,
   }
 }
 
 function incrementCount(target: Record<string, number>, key: string, amount = 1) {
   target[key] = (target[key] ?? 0) + amount
-}
-
-function healthcareWeight(kind: string) {
-  if (kind === "hospital") return 5
-  if (kind === "clinic" || kind === "doctors") return 3
-  if (kind === "pharmacy") return 2
-  return 1
-}
-
-function essentialWeight(poi: PoiFeatureProperties) {
-  if (poi.kind === "toilets") {
-    if (poi.toilets_wheelchair === "yes" || poi.wheelchair === "yes") return 2
-    return 1
-  }
-  if (poi.kind === "drinking_water") return 1
-  if (poi.kind === "bench") return 1
-  return 0.5
 }
 
 function cloneCounts(counts: Record<string, number>) {
@@ -479,52 +491,13 @@ function formatLocationLabel(tags: Record<string, string>, lon: number, lat: num
   return `${lat.toFixed(5)}, ${lon.toFixed(5)}`
 }
 
-function componentImportance(stats: ComponentStats) {
-  return stats.length_m / 1000 + 2.5 * stats.healthcare_score + 0.5 * stats.essentials_score
-}
-
-function summarizeUnlockedServices(
-  healthcareCounts: Record<string, number>,
-  essentialCounts: Record<string, number>
-) {
-  const parts: string[] = []
-  const healthcareSummary = Object.entries(healthcareCounts)
+function summarizeUnlockedDestinations(destinationCounts: Record<string, number>) {
+  const summary = Object.entries(destinationCounts)
     .filter(([, value]) => value > 0)
     .sort((left, right) => right[1] - left[1])
-    .slice(0, 3)
+    .slice(0, 4)
     .map(([kind, count]) => `${count} ${kind}`)
-  if (healthcareSummary.length > 0) {
-    parts.push(`healthcare: ${healthcareSummary.join(", ")}`)
-  }
-  const essentialSummary = Object.entries(essentialCounts)
-    .filter(([, value]) => value > 0)
-    .sort((left, right) => right[1] - left[1])
-    .slice(0, 3)
-    .map(([kind, count]) => `${count} ${kind}`)
-  if (essentialSummary.length > 0) {
-    parts.push(`essentials: ${essentialSummary.join(", ")}`)
-  }
-  return parts.length > 0 ? parts.join(" | ") : "no mapped services"
-}
-
-function candidatePreferred(next: CandidateInternal, current: CandidateInternal) {
-  const confidenceRank: Record<Confidence, number> = { low: 0, medium: 1, high: 2 }
-  if (confidenceRank[next.confidence] !== confidenceRank[current.confidence]) {
-    return confidenceRank[next.confidence] > confidenceRank[current.confidence]
-  }
-  if (next.report_signal_count !== current.report_signal_count) {
-    return next.report_signal_count > current.report_signal_count
-  }
-  if (next.fix_cost_penalty !== current.fix_cost_penalty) {
-    return next.fix_cost_penalty < current.fix_cost_penalty
-  }
-  if (next.blocked_length_m !== current.blocked_length_m) {
-    return next.blocked_length_m < current.blocked_length_m
-  }
-  if (next.distance_km !== current.distance_km) {
-    return next.distance_km < current.distance_km
-  }
-  return next.blocker_id < current.blocker_id
+  return summary.length > 0 ? summary.join(", ") : "no snapped destinations"
 }
 
 function sanitizeTags(tags: Record<string, string>) {
@@ -554,11 +527,105 @@ function sanitizeTags(tags: Record<string, string>) {
 function createEmptyComponentStats(): ComponentStats {
   return {
     length_m: 0,
-    healthcare_score: 0,
-    essentials_score: 0,
-    healthcare_counts: {},
-    essentials_counts: {},
     poi_count: 0,
+    destination_counts: {},
+  }
+}
+
+function computeNetworkAccessibilityScores(input: {
+  total_length_m: number
+  pass_length_m: number
+  limited_length_m: number
+  blocked_edges: number
+  largest_pass_component_length_m: number
+}): AccessibilityScores {
+  const total = Math.max(input.total_length_m, 1)
+  const pass = Math.max(input.pass_length_m, 0)
+  const limited = Math.max(input.limited_length_m, 0)
+  const coverageRatio = Math.min(1, pass / total)
+  const continuityRatio = pass > 0 ? Math.min(1, input.largest_pass_component_length_m / pass) : 0
+  const qualityRatio = Math.min(1, (pass + limited * 0.6) / total)
+  const blockedPerKm = input.blocked_edges / Math.max(0.5, total / 1000)
+  const blockerPressureRatio = Math.min(1, blockedPerKm / 3)
+  const nas =
+    100 *
+    (0.35 * coverageRatio +
+      0.3 * continuityRatio +
+      0.2 * qualityRatio +
+      0.15 * (1 - blockerPressureRatio))
+  return {
+    coverage_ratio: coverageRatio,
+    continuity_ratio: continuityRatio,
+    quality_ratio: qualityRatio,
+    blocker_pressure_ratio: blockerPressureRatio,
+    network_accessibility_score: nas,
+  }
+}
+
+function buildScoreGridGeojson(
+  bbox: BBox,
+  edges: PedestrianEdge[],
+  cols = 8,
+  rows = 8
+): FeatureCollection<Polygon> {
+  const [minLon, minLat, maxLon, maxLat] = bbox
+  const lonStep = (maxLon - minLon) / cols
+  const latStep = (maxLat - minLat) / rows
+  const features: Feature<Polygon>[] = []
+
+  for (let x = 0; x < cols; x += 1) {
+    for (let y = 0; y < rows; y += 1) {
+      const cellMinLon = minLon + x * lonStep
+      const cellMaxLon = minLon + (x + 1) * lonStep
+      const cellMinLat = minLat + y * latStep
+      const cellMaxLat = minLat + (y + 1) * latStep
+
+      const localEdges = edges.filter((edge) => {
+        const [lon, lat] = edge.mid_coord
+        return lon >= cellMinLon && lon < cellMaxLon && lat >= cellMinLat && lat < cellMaxLat
+      })
+      if (localEdges.length === 0) continue
+
+      let totalLength = 0
+      let passLength = 0
+      let limitedLength = 0
+      let blockedCount = 0
+      for (const edge of localEdges) {
+        totalLength += edge.length_m
+        if (edge.classification.status === "PASS") passLength += edge.length_m
+        if (edge.classification.status === "LIMITED") limitedLength += edge.length_m
+        if (edge.classification.status === "BLOCKED") blockedCount += 1
+      }
+
+      const local = computeNetworkAccessibilityScores({
+        total_length_m: totalLength,
+        pass_length_m: passLength,
+        limited_length_m: limitedLength,
+        blocked_edges: blockedCount,
+        largest_pass_component_length_m: passLength,
+      })
+
+      features.push(
+        polygonFeature(
+          [
+            [cellMinLon, cellMinLat],
+            [cellMaxLon, cellMinLat],
+            [cellMaxLon, cellMaxLat],
+            [cellMinLon, cellMaxLat],
+            [cellMinLon, cellMinLat],
+          ],
+          {
+            grid_id: `${x}-${y}`,
+            nas_score: Number(local.network_accessibility_score.toFixed(2)),
+            edge_count: localEdges.length,
+          }
+        )
+      )
+    }
+  }
+  return {
+    type: "FeatureCollection",
+    features,
   }
 }
 
@@ -569,15 +636,18 @@ function toPublicCandidate(candidate: CandidateInternal): AccessBlockerCandidate
     blocker_type: candidate.blocker_type,
     name: candidate.name,
     score: Number(candidate.score.toFixed(3)),
-    unlock_km: Number(candidate.unlock_km.toFixed(2)),
-    gain_km: Number(candidate.unlock_km.toFixed(2)),
-    blocked_km: Number(candidate.blocked_km.toFixed(2)),
-    unlocked_healthcare_score: Number(candidate.unlocked_healthcare_score.toFixed(2)),
-    unlocked_essentials_score: Number(candidate.unlocked_essentials_score.toFixed(2)),
-    unlocked_healthcare_counts: cloneCounts(candidate.unlocked_healthcare_counts),
-    unlocked_essentials_counts: cloneCounts(candidate.unlocked_essentials_counts),
+    unlock_m: Math.max(0, Math.round(candidate.unlock_m)),
+    blocked_m: Math.max(0, Math.round(candidate.blocked_m)),
+    distance_m: Math.max(0, Math.round(candidate.distance_m)),
+    delta_nas_points: Number(candidate.delta_nas_points.toFixed(3)),
+    delta_oas_points: Number(candidate.delta_oas_points.toFixed(3)),
+    delta_general_points: Number(candidate.delta_general_points.toFixed(3)),
+    baseline_general_index: Number(candidate.baseline_general_index.toFixed(3)),
+    post_fix_general_index: Number(candidate.post_fix_general_index.toFixed(3)),
+    unlocked_poi_count: candidate.unlocked_poi_count,
+    unlocked_destination_counts: cloneCounts(candidate.unlocked_destination_counts),
+    unlocked_component_id: candidate.unlocked_component_id,
     confidence: candidate.confidence,
-    distance_km: Number(candidate.distance_km.toFixed(2)),
     osm_id: candidate.osm_id,
     tags: sanitizeTags(candidate.tags),
     inferred_signals: [...new Set(candidate.inferred_signals)],
@@ -627,25 +697,26 @@ export function runAnalysisPipeline(
 
   for (const way of pedestrianWays) {
     const tags = asTags(way.tags)
-    const nodes = way.nodes
-    if (!Array.isArray(nodes) || nodes.length < 2) continue
-    for (let index = 0; index < nodes.length - 1; index += 1) {
-      const fromId = nodes[index]
-      const toId = nodes[index + 1]
+    if (!Array.isArray(way.nodes) || way.nodes.length < 2) continue
+    for (let index = 0; index < way.nodes.length - 1; index += 1) {
+      const fromId = way.nodes[index]
+      const toId = way.nodes[index + 1]
       const fromNode = nodeById.get(fromId)
       const toNode = nodeById.get(toId)
       if (!fromNode || !toNode) continue
+      const fromCoord: Coord = [fromNode.lon, fromNode.lat]
+      const toCoord: Coord = [toNode.lon, toNode.lat]
+      const midCoord: Coord = [(fromCoord[0] + toCoord[0]) / 2, (fromCoord[1] + toCoord[1]) / 2]
 
       graphNodeIds.add(fromId)
       graphNodeIds.add(toId)
-      nodeIndex.insertPoint([fromNode.lon, fromNode.lat], fromId)
-      nodeIndex.insertPoint([toNode.lon, toNode.lat], toId)
+      nodeIndex.insertPoint(fromCoord, fromId)
+      nodeIndex.insertPoint(toCoord, toId)
 
-      const hasRaisedKerbEndpoint = raisedKerbNodeIds.has(fromId) || raisedKerbNodeIds.has(toId)
-      const classification = classifyPedestrianEdgeAccessibility(tags, hasRaisedKerbEndpoint)
-      const fromCoord: Coord = [fromNode.lon, fromNode.lat]
-      const toCoord: Coord = [toNode.lon, toNode.lat]
-
+      const classification = classifyPedestrianEdgeAccessibility(
+        tags,
+        raisedKerbNodeIds.has(fromId) || raisedKerbNodeIds.has(toId)
+      )
       edges.push({
         edge_id: `${way.id}-${index}`,
         way_id: way.id,
@@ -653,14 +724,11 @@ export function runAnalysisPipeline(
         to: toId,
         from_coord: fromCoord,
         to_coord: toCoord,
+        mid_coord: midCoord,
         length_m: haversineMeters(fromCoord, toCoord),
         tags,
         classification,
-        location_label: formatLocationLabel(
-          tags,
-          (fromCoord[0] + toCoord[0]) / 2,
-          (fromCoord[1] + toCoord[1]) / 2
-        ),
+        location_label: formatLocationLabel(tags, midCoord[0], midCoord[1]),
       })
     }
   }
@@ -668,15 +736,12 @@ export function runAnalysisPipeline(
   if (graphNodeIds.size > MAX_GRAPH_NODES || edges.length > MAX_GRAPH_EDGES) {
     throw new Error("Area too large for analysis. Click a POI in a denser neighborhood or zoom in first.")
   }
-
   if (edges.length === 0) {
     warnings.push("No mapped pedestrian network found in this area.")
   }
 
   const dsu = new DisjointSet()
-  for (const nodeId of graphNodeIds) {
-    dsu.makeSet(nodeId)
-  }
+  for (const nodeId of graphNodeIds) dsu.makeSet(nodeId)
   for (const edge of edges) {
     if (edge.classification.status === "PASS") {
       dsu.union(edge.from, edge.to)
@@ -690,15 +755,36 @@ export function runAnalysisPipeline(
     }
     return componentStats.get(componentId) as ComponentStats
   }
-
   for (const nodeId of graphNodeIds) {
     ensureComponent(dsu.find(nodeId))
   }
+
+  let totalLengthM = 0
+  let passLengthM = 0
+  let limitedLengthM = 0
+  let blockedLengthM = 0
+  let blockedEdgesCount = 0
   for (const edge of edges) {
-    if (edge.classification.status !== "PASS") continue
-    const root = dsu.find(edge.from)
-    const stats = ensureComponent(root)
-    stats.length_m += edge.length_m
+    totalLengthM += edge.length_m
+    if (edge.classification.status === "PASS") {
+      passLengthM += edge.length_m
+      const componentId = dsu.find(edge.from)
+      ensureComponent(componentId).length_m += edge.length_m
+      continue
+    }
+    if (edge.classification.status === "LIMITED") {
+      limitedLengthM += edge.length_m
+    } else {
+      blockedLengthM += edge.length_m
+      blockedEdgesCount += 1
+    }
+  }
+
+  let largestPassComponentLength = 0
+  for (const stats of componentStats.values()) {
+    if (stats.length_m > largestPassComponentLength) {
+      largestPassComponentLength = stats.length_m
+    }
   }
 
   const rawPoisGeojson = overpassToPoisGeojson(response)
@@ -706,41 +792,24 @@ export function runAnalysisPipeline(
   let snappedPois = 0
   let unsnappedPois = 0
   for (const feature of rawPoisGeojson.features) {
-    const geometry = feature.geometry
-    if (!geometry || geometry.type !== "Point") continue
-    const coordinates = geometry.coordinates as Coord
-    const props = feature.properties
-    if (!props) continue
-
-    const snapped = nearestGraphNode(coordinates, nodeIndex, nodeById, MAX_POI_SNAP_DISTANCE_M)
-    const enrichedProps: PoiFeatureProperties = {
-      ...props,
+    if (feature.geometry?.type !== "Point" || !feature.properties) continue
+    const coords = feature.geometry.coordinates as Coord
+    const snapped = nearestGraphNode(coords, nodeIndex, nodeById, MAX_POI_SNAP_DISTANCE_M)
+    const enriched: PoiFeatureProperties = {
+      ...feature.properties,
       snapped_node_id: snapped?.node_id ?? null,
       snap_distance_m: snapped ? Number(snapped.distance_m.toFixed(2)) : null,
     }
-
     if (snapped) {
       snappedPois += 1
       const componentId = dsu.find(snapped.node_id)
       const stats = ensureComponent(componentId)
       stats.poi_count += 1
-      if (props.theme === "healthcare") {
-        const weight = healthcareWeight(props.kind)
-        stats.healthcare_score += weight
-        incrementCount(stats.healthcare_counts, props.kind, 1)
-      } else {
-        const weight = essentialWeight(props)
-        stats.essentials_score += weight
-        incrementCount(stats.essentials_counts, props.kind, 1)
-      }
+      incrementCount(stats.destination_counts, feature.properties.kind, 1)
     } else {
       unsnappedPois += 1
     }
-
-    snappedPoiFeatures.push({
-      ...feature,
-      properties: enrichedProps,
-    })
+    snappedPoiFeatures.push({ ...feature, properties: enriched })
   }
 
   const pois_geojson: FeatureCollection<Point, PoiFeatureProperties> = {
@@ -765,83 +834,83 @@ export function runAnalysisPipeline(
     let bestLength = -1
     for (const [componentId, stats] of componentStats.entries()) {
       if (stats.length_m > bestLength) {
-        bestComponent = componentId
         bestLength = stats.length_m
+        bestComponent = componentId
       }
     }
     baseComponentId = bestComponent
-    warnings.push("Could not snap anchor point; using the largest reachable component as fallback.")
+    warnings.push("Could not snap anchor point; using the largest passable component as fallback.")
   }
 
-  const pickBestNonBaseComponent = () => {
-    let bestComponent: number | null = null
-    let bestScore = Number.NEGATIVE_INFINITY
-    for (const [componentId, stats] of componentStats.entries()) {
-      if (baseComponentId !== null && componentId === baseComponentId) continue
-      const score = componentImportance(stats)
-      if (score > bestScore) {
-        bestScore = score
-        bestComponent = componentId
-      }
-    }
-    return bestComponent
-  }
+  const baseStats = baseComponentId !== null ? componentStats.get(baseComponentId) : null
+  const baseReachablePois = baseStats?.poi_count ?? 0
+  const baselineOpportunityScore = snappedPois > 0 ? (100 * baseReachablePois) / snappedPois : 50
+  const baselineNetwork = computeNetworkAccessibilityScores({
+    total_length_m: totalLengthM,
+    pass_length_m: passLengthM,
+    limited_length_m: limitedLengthM,
+    blocked_edges: blockedEdgesCount,
+    largest_pass_component_length_m: largestPassComponentLength,
+  })
+  const baselineGeneralScore =
+    baselineNetwork.network_accessibility_score * 0.7 + baselineOpportunityScore * 0.3
 
   const rawCandidates: CandidateInternal[] = []
   const blockedSegmentsFeatures: Feature<LineString>[] = []
 
   for (const edge of edges) {
-    const status = edge.classification.status
-    if (status === "PASS") continue
+    if (edge.classification.status === "PASS") continue
 
     blockedSegmentsFeatures.push(
       lineFeature([edge.from_coord, edge.to_coord], {
         edge_id: edge.edge_id,
         way_id: edge.way_id,
         blocker_type: edge.classification.blocker_type ?? "other",
-        status,
+        status: edge.classification.status,
+        quality_score: edge.classification.quality_score,
       })
     )
 
     const leftComponent = dsu.find(edge.from)
     const rightComponent = dsu.find(edge.to)
     if (leftComponent === rightComponent) continue
+    if (baseComponentId === null) continue
 
     let otherComponent: number | null = null
-    let groupedKey = `${leftComponent}<->${rightComponent}`
-    if (baseComponentId !== null) {
-      if (leftComponent === baseComponentId && rightComponent !== baseComponentId) {
-        otherComponent = rightComponent
-      } else if (rightComponent === baseComponentId && leftComponent !== baseComponentId) {
-        otherComponent = leftComponent
-      } else {
-        continue
-      }
-      groupedKey = `${baseComponentId}->${otherComponent}`
-    } else {
-      const leftScore = componentImportance(ensureComponent(leftComponent))
-      const rightScore = componentImportance(ensureComponent(rightComponent))
-      otherComponent = leftScore >= rightScore ? rightComponent : leftComponent
+    if (leftComponent === baseComponentId && rightComponent !== baseComponentId) {
+      otherComponent = rightComponent
+    } else if (rightComponent === baseComponentId && leftComponent !== baseComponentId) {
+      otherComponent = leftComponent
     }
+    if (otherComponent === null) continue
 
-    const otherStats = otherComponent !== null ? componentStats.get(otherComponent) : null
+    const otherStats = componentStats.get(otherComponent)
     if (!otherStats) continue
-    const unlockKm = otherStats.length_m / 1000
-    if (unlockKm <= 0 && otherStats.healthcare_score <= 0 && otherStats.essentials_score <= 0) continue
+
+    const unlockMeters = otherStats.length_m
+    const postPassLength = passLengthM + edge.length_m
+    const postLargestLength = Math.max(
+      largestPassComponentLength,
+      (baseStats?.length_m ?? 0) + otherStats.length_m + edge.length_m
+    )
+    const postNetwork = computeNetworkAccessibilityScores({
+      total_length_m: totalLengthM,
+      pass_length_m: postPassLength,
+      limited_length_m: limitedLengthM,
+      blocked_edges: Math.max(0, blockedEdgesCount - 1),
+      largest_pass_component_length_m: postLargestLength,
+    })
+    const postOpportunity =
+      snappedPois > 0 ? (100 * (baseReachablePois + otherStats.poi_count)) / snappedPois : 50
+    const postGeneral = postNetwork.network_accessibility_score * 0.7 + postOpportunity * 0.3
+    const deltaNas = postNetwork.network_accessibility_score - baselineNetwork.network_accessibility_score
+    const deltaOas = postOpportunity - baselineOpportunityScore
+    const deltaGeneral = postGeneral - baselineGeneralScore
 
     const blockerType = edge.classification.blocker_type ?? "other"
-    const midPoint: Coord = [
-      (edge.from_coord[0] + edge.to_coord[0]) / 2,
-      (edge.from_coord[1] + edge.to_coord[1]) / 2,
-    ]
-    const baseConfidenceBonus = confidenceBonus(edge.classification.confidence)
     const fixPenalty = blockerFixCostPenalty(blockerType)
-    const score =
-      unlockKm +
-      2.5 * otherStats.healthcare_score +
-      0.5 * otherStats.essentials_score +
-      baseConfidenceBonus -
-      fixPenalty
+    const confidenceBoost = confidenceBonus(edge.classification.confidence)
+    const score = deltaGeneral * 3 + unlockMeters / 750 + confidenceBoost - fixPenalty
 
     rawCandidates.push({
       blocker_id: `blk-${edge.edge_id}`,
@@ -849,29 +918,31 @@ export function runAnalysisPipeline(
       blocker_type: blockerType,
       name: kindLabel(blockerType),
       score,
-      unlock_km: unlockKm,
-      blocked_km: edge.length_m / 1000,
-      unlocked_healthcare_score: otherStats.healthcare_score,
-      unlocked_essentials_score: otherStats.essentials_score,
-      unlocked_healthcare_counts: cloneCounts(otherStats.healthcare_counts),
-      unlocked_essentials_counts: cloneCounts(otherStats.essentials_counts),
+      unlock_m: unlockMeters,
+      blocked_m: edge.length_m,
+      distance_m: haversineMeters(anchorPoint, edge.mid_coord),
+      delta_nas_points: deltaNas,
+      delta_oas_points: deltaOas,
+      delta_general_points: deltaGeneral,
+      baseline_general_index: baselineGeneralScore,
+      post_fix_general_index: postGeneral,
+      unlocked_poi_count: otherStats.poi_count,
+      unlocked_destination_counts: cloneCounts(otherStats.destination_counts),
+      unlocked_component_id: otherComponent,
       confidence: edge.classification.confidence,
-      distance_km: haversineMeters(anchorPoint, midPoint) / 1000,
       osm_id: `way/${edge.way_id}`,
       tags: edge.tags,
       inferred_signals: [...edge.classification.inferred_signals],
       report_signal_count: 0,
-      confidence_bonus: baseConfidenceBonus,
+      confidence_bonus: confidenceBoost,
       fix_cost_penalty: fixPenalty,
-      reason: `Separates currently reachable network from ${summarizeUnlockedServices(
-        otherStats.healthcare_counts,
-        otherStats.essentials_counts
+      reason: `Fix reconnects ${Math.round(unlockMeters)} m of passable network and unlocks ${summarizeUnlockedDestinations(
+        otherStats.destination_counts
       )}.`,
-      grouped_component_key: groupedKey,
+      grouped_component_key: `${baseComponentId}->${otherComponent}`,
       location_label: edge.location_label,
-      lat: midPoint[1],
-      lon: midPoint[0],
-      blocked_length_m: edge.length_m,
+      lat: edge.mid_coord[1],
+      lon: edge.mid_coord[0],
     })
   }
 
@@ -891,9 +962,7 @@ export function runAnalysisPipeline(
     }))
 
   const reportIndex = new SpatialHash<number>(0.015, 0.015)
-  reportSignals.forEach((report, index) => {
-    reportIndex.insertPoint(report.coordinates, index)
-  })
+  reportSignals.forEach((report, index) => reportIndex.insertPoint(report.coordinates, index))
   const matchedReportIds = new Set<string>()
 
   const candidatesWithReports = rawCandidates.map((candidate) => {
@@ -909,26 +978,23 @@ export function runAnalysisPipeline(
     let nearbyEffective = 0
     let strongestConfidence: Confidence = candidate.confidence
     const categories = new Set<string>()
-    for (const reportIndexValue of nearbyIndexes) {
-      const report = reportSignals[reportIndexValue]
+    for (const reportIdx of nearbyIndexes) {
+      const report = reportSignals[reportIdx]
       if (!report) continue
-      const distance = haversineMeters(point, report.coordinates)
-      if (distance > REPORT_SIGNAL_DISTANCE_M) continue
+      if (haversineMeters(point, report.coordinates) > REPORT_SIGNAL_DISTANCE_M) continue
       matchedReportIds.add(report.report_id)
       nearbyEffective += report.effective_reports
       strongestConfidence = bumpConfidence(strongestConfidence, report.confidence)
       categories.add(report.category)
     }
-    if (nearbyEffective <= 0) {
-      return candidate
-    }
+    if (nearbyEffective <= 0) return candidate
 
-    const reportBonus = Math.min(1.5, nearbyEffective * 0.25)
+    const bonus = Math.min(2, nearbyEffective * 0.4)
     return {
       ...candidate,
       confidence: strongestConfidence,
-      score: candidate.score + reportBonus,
-      confidence_bonus: candidate.confidence_bonus + reportBonus,
+      score: candidate.score + bonus,
+      confidence_bonus: candidate.confidence_bonus + bonus,
       report_signal_count: nearbyEffective,
       inferred_signals: [
         ...candidate.inferred_signals,
@@ -943,44 +1009,33 @@ export function runAnalysisPipeline(
   const syntheticCandidates: CandidateInternal[] = []
   for (const report of reportSignals) {
     if (matchedReportIds.has(report.report_id)) continue
-    const category = report.category.toLowerCase().trim()
-    if (!HARD_REPORT_CATEGORIES.has(category)) continue
+    if (!HARD_REPORT_CATEGORIES.has(report.category.toLowerCase().trim())) continue
+    if (baseComponentId === null) continue
 
-    let otherComponent: number | null = null
     const snappedReportNode = nearestGraphNode(
       report.coordinates,
       nodeIndex,
       nodeById,
       MAX_REPORT_SNAP_DISTANCE_M
     )
-    if (snappedReportNode) {
-      const reportComponent = dsu.find(snappedReportNode.node_id)
-      if (baseComponentId !== null && reportComponent !== baseComponentId) {
-        otherComponent = reportComponent
-      }
-    }
-    if (otherComponent === null) {
-      otherComponent = pickBestNonBaseComponent()
-    }
-    if (otherComponent === null) continue
+    const reportComponent =
+      snappedReportNode && dsu.find(snappedReportNode.node_id) !== baseComponentId
+        ? dsu.find(snappedReportNode.node_id)
+        : null
+    if (reportComponent === null) continue
 
-    const otherStats = componentStats.get(otherComponent)
+    const otherStats = componentStats.get(reportComponent)
     if (!otherStats) continue
-    if (baseComponentId !== null && otherComponent === baseComponentId) continue
 
-    const reportConfidenceBonus =
+    const postOpportunity =
+      snappedPois > 0 ? (100 * (baseReachablePois + otherStats.poi_count)) / snappedPois : 50
+    const postGeneral = baselineNetwork.network_accessibility_score * 0.7 + postOpportunity * 0.3
+    const deltaOas = postOpportunity - baselineOpportunityScore
+    const deltaGeneral = postGeneral - baselineGeneralScore
+    const confidenceBoost =
       confidenceBonus(report.confidence) + Math.min(1.2, report.effective_reports * 0.2)
     const fixPenalty = blockerFixCostPenalty("report")
-    const unlockKm = otherStats.length_m / 1000
-    const score =
-      unlockKm +
-      2.5 * otherStats.healthcare_score +
-      0.5 * otherStats.essentials_score +
-      reportConfidenceBonus -
-      fixPenalty
-
-    const groupedKey =
-      baseComponentId !== null ? `${baseComponentId}->${otherComponent}` : `synthetic->${otherComponent}`
+    const score = deltaGeneral * 3 + otherStats.length_m / 750 + confidenceBoost - fixPenalty
 
     syntheticCandidates.push({
       blocker_id: `blk-report-${report.report_id}`,
@@ -988,50 +1043,45 @@ export function runAnalysisPipeline(
       blocker_type: "report",
       name: "Reported accessibility blocker",
       score,
-      unlock_km: unlockKm,
-      blocked_km: 0.03,
-      unlocked_healthcare_score: otherStats.healthcare_score,
-      unlocked_essentials_score: otherStats.essentials_score,
-      unlocked_healthcare_counts: cloneCounts(otherStats.healthcare_counts),
-      unlocked_essentials_counts: cloneCounts(otherStats.essentials_counts),
+      unlock_m: otherStats.length_m,
+      blocked_m: 30,
+      distance_m: haversineMeters(anchorPoint, report.coordinates),
+      delta_nas_points: 0,
+      delta_oas_points: deltaOas,
+      delta_general_points: deltaGeneral,
+      baseline_general_index: baselineGeneralScore,
+      post_fix_general_index: postGeneral,
+      unlocked_poi_count: otherStats.poi_count,
+      unlocked_destination_counts: cloneCounts(otherStats.destination_counts),
+      unlocked_component_id: reportComponent,
       confidence: report.confidence,
-      distance_km: haversineMeters(anchorPoint, report.coordinates) / 1000,
       osm_id: `report/${report.report_id}`,
-      tags: {
-        report_category: report.category,
-      },
+      tags: { report_category: report.category },
       inferred_signals: [`Community report category: ${report.category}.`],
       report_signal_count: report.effective_reports,
-      confidence_bonus: reportConfidenceBonus,
+      confidence_bonus: confidenceBoost,
       fix_cost_penalty: fixPenalty,
-      reason: `Report indicates a hard blocker near ${report.coordinates[1].toFixed(5)}, ${report.coordinates[0].toFixed(5)} separating reachable paths from ${summarizeUnlockedServices(
-        otherStats.healthcare_counts,
-        otherStats.essentials_counts
-      )}.`,
-      grouped_component_key: groupedKey,
+      reason: `Community reports indicate a hard blocker disconnecting ${Math.round(
+        otherStats.length_m
+      )} m and ${otherStats.poi_count} destinations.`,
+      grouped_component_key: `${baseComponentId}->${reportComponent}`,
       location_label: `${report.coordinates[1].toFixed(5)}, ${report.coordinates[0].toFixed(5)}`,
       lat: report.coordinates[1],
       lon: report.coordinates[0],
-      blocked_length_m: 30,
     })
   }
 
   const grouped = new Map<string, CandidateInternal>()
   for (const candidate of [...candidatesWithReports, ...syntheticCandidates]) {
-    const existing = grouped.get(candidate.grouped_component_key)
-    if (!existing || candidatePreferred(candidate, existing)) {
+    const current = grouped.get(candidate.grouped_component_key)
+    if (!current || candidate.score > current.score) {
       grouped.set(candidate.grouped_component_key, candidate)
     }
   }
 
   const rankedCandidates = [...grouped.values()]
-    .sort((left, right) => {
-      if (right.score !== left.score) return right.score - left.score
-      if (right.unlock_km !== left.unlock_km) return right.unlock_km - left.unlock_km
-      return left.distance_km - right.distance_km
-    })
+    .sort((left, right) => right.score - left.score || right.unlock_m - left.unlock_m)
     .slice(0, 240)
-
   const rankings = rankedCandidates.map(toPublicCandidate)
 
   const barriersGeojson: FeatureCollection<Point> = {
@@ -1042,8 +1092,15 @@ export function runAnalysisPipeline(
         blocker_id: candidate.blocker_id,
         type: candidate.blocker_type,
         name: candidate.name,
-        gain_km: candidate.gain_km,
-        unlock_km: candidate.unlock_km,
+        unlock_m: candidate.unlock_m,
+        blocked_m: candidate.blocked_m,
+        delta_nas_points: candidate.delta_nas_points,
+        delta_oas_points: candidate.delta_oas_points,
+        delta_general_points: candidate.delta_general_points,
+        baseline_general_index: candidate.baseline_general_index,
+        post_fix_general_index: candidate.post_fix_general_index,
+        unlocked_component_id: candidate.unlocked_component_id,
+        grouped_component_key: candidate.grouped_component_key,
         score: candidate.score,
         confidence: candidate.confidence,
         report_signal_count: candidate.report_signal_count,
@@ -1059,6 +1116,7 @@ export function runAnalysisPipeline(
         way_id: edge.way_id,
         status: edge.classification.status,
         blocker_type: edge.classification.blocker_type ?? "pass",
+        quality_score: edge.classification.quality_score,
       })
     ),
   }
@@ -1067,13 +1125,17 @@ export function runAnalysisPipeline(
     type: "FeatureCollection",
     features: edges
       .filter((edge) => edge.classification.status === "PASS")
-      .map((edge) =>
-        lineFeature([edge.from_coord, edge.to_coord], {
+      .map((edge) => {
+        const componentId = dsu.find(edge.from)
+        return lineFeature([edge.from_coord, edge.to_coord], {
           edge_id: edge.edge_id,
           way_id: edge.way_id,
           status: "PASS",
+          quality_score: edge.classification.quality_score,
+          component_id: componentId,
+          is_base_component: baseComponentId !== null && componentId === baseComponentId,
         })
-      ),
+      }),
   }
 
   const blockedSegmentsGeojson: FeatureCollection<LineString> = {
@@ -1081,12 +1143,13 @@ export function runAnalysisPipeline(
     features: blockedSegmentsFeatures,
   }
 
+  const scoreGridGeojson = buildScoreGridGeojson(bbox, edges)
   const passEdges = edges.filter((edge) => edge.classification.status === "PASS").length
   const limitedEdges = edges.filter((edge) => edge.classification.status === "LIMITED").length
   const blockedEdges = edges.filter((edge) => edge.classification.status === "BLOCKED").length
 
   const calculationMethod =
-    "AccessBlocker Radar uses PASS-edge Union-Find components and ranks blockers by unlocked path distance, healthcare reach, essential reach, and confidence signals."
+    "General Accessibility Index = 0.7 * Network Accessibility Score + 0.3 * Opportunity Accessibility Score. Blockers are ranked by simulated post-fix score delta and unlocked passable meters."
 
   return {
     payload: {
@@ -1095,6 +1158,7 @@ export function runAnalysisPipeline(
       blocked_segments_geojson: blockedSegmentsGeojson,
       barriers_geojson: barriersGeojson,
       pois_geojson,
+      score_grid_geojson: scoreGridGeojson,
       rankings,
       meta: {
         bbox,
@@ -1105,7 +1169,21 @@ export function runAnalysisPipeline(
           "Undirected pedestrian connectivity approximation",
           "Strict wheelchair profile for hard blockers",
           "POIs counted only when snapped to the pedestrian network",
+          "General score combines network traversability and destination reach",
         ],
+        accessibility: {
+          network_accessibility_score: Number(
+            baselineNetwork.network_accessibility_score.toFixed(3)
+          ),
+          opportunity_accessibility_score: Number(baselineOpportunityScore.toFixed(3)),
+          general_accessibility_index: Number(baselineGeneralScore.toFixed(3)),
+          metrics: {
+            coverage_ratio: Number(baselineNetwork.coverage_ratio.toFixed(4)),
+            continuity_ratio: Number(baselineNetwork.continuity_ratio.toFixed(4)),
+            quality_ratio: Number(baselineNetwork.quality_ratio.toFixed(4)),
+            blocker_pressure_ratio: Number(baselineNetwork.blocker_pressure_ratio.toFixed(4)),
+          },
+        },
         counts: {
           pedestrian_ways: pedestrianWays.length,
           stream_ways: pedestrianWays.length,
@@ -1129,6 +1207,10 @@ export function runAnalysisPipeline(
           grouped_candidates: grouped.size,
           synthetic_candidates: syntheticCandidates.length,
           reports_in_bbox: reportSignals.length,
+          total_network_m: Math.round(totalLengthM),
+          pass_network_m: Math.round(passLengthM),
+          limited_network_m: Math.round(limitedLengthM),
+          blocked_network_m: Math.round(blockedLengthM),
         },
       },
     },

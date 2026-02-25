@@ -10,3 +10,7 @@ export function haversineKm(a: [number, number], b: [number, number]) {
   const h = sinDLat * sinDLat + Math.cos(lat1) * Math.cos(lat2) * sinDLon * sinDLon
   return 2 * R * Math.asin(Math.sqrt(Math.max(0, Math.min(1, h))))
 }
+
+export function haversineMeters(a: [number, number], b: [number, number]) {
+  return haversineKm(a, b) * 1000
+}

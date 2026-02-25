@@ -7,7 +7,7 @@ import { analyze, getReports, getResult } from "@/lib/api/client"
 import { candidatesFromAnalyzeResult } from "@/lib/barrier-candidate"
 import { copyTextToClipboard } from "@/lib/clipboard"
 import { mapManager } from "@/lib/map/manager"
-import { haversineKm } from "@/lib/haversine"
+import { haversineMeters } from "@/lib/haversine"
 import { PanelHeader } from "@/components/panel-header"
 import { MetricCard, SelectPill } from "@/components/view-helpers"
 import {
@@ -19,21 +19,31 @@ import {
   Link2,
   Flag,
   AlertTriangle,
-  Waves,
-  Mountain,
   ChevronRight,
 } from "lucide-react"
 
 const barrierTypeIcons: Record<string, typeof AlertTriangle> = {
-  dam: AlertTriangle,
-  weir: Waves,
-  waterfall: Mountain,
+  stairs: AlertTriangle,
+  raised_kerb: AlertTriangle,
+  steep_incline: AlertTriangle,
+  rough_surface: AlertTriangle,
+  wheelchair_no: AlertTriangle,
+  wheelchair_limited: AlertTriangle,
+  access_no: AlertTriangle,
+  report: AlertTriangle,
+  other: AlertTriangle,
 }
 
 const barrierTypeColors: Record<string, string> = {
-  dam: "#FF6B35",
-  weir: "#007AFF",
-  waterfall: "#34C759",
+  stairs: "#FF6B35",
+  raised_kerb: "#007AFF",
+  steep_incline: "#A855F7",
+  rough_surface: "#F59E0B",
+  wheelchair_no: "#DC2626",
+  wheelchair_limited: "#F59E0B",
+  access_no: "#DC2626",
+  report: "#06B6D4",
+  other: "#6B7280",
 }
 
 const confidenceColors: Record<string, { bg: string; text: string }> = {
@@ -44,9 +54,32 @@ const confidenceColors: Record<string, { bg: string; text: string }> = {
 
 const LOADING_STEPS = [
   "Fetching OSM data...",
-  "Computing barrier impact...",
-  "Preparing map layers...",
+  "Computing accessibility graph...",
+  "Ranking blockers and map overlays...",
 ]
+
+function formatMeters(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "N/A"
+  return `${Math.max(0, Math.round(value))} m`
+}
+
+function formatScoreDelta(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "0.0"
+  const sign = value > 0 ? "+" : ""
+  return `${sign}${value.toFixed(1)}`
+}
+
+function blockerTypeLabel(type: string) {
+  if (type === "stairs") return "Stairs"
+  if (type === "raised_kerb") return "Raised kerb"
+  if (type === "steep_incline") return "Steep incline"
+  if (type === "rough_surface") return "Rough surface"
+  if (type === "wheelchair_no") return "Wheelchair=no"
+  if (type === "wheelchair_limited") return "Wheelchair=limited"
+  if (type === "access_no") return "Access restricted"
+  if (type === "report") return "Report-derived blocker"
+  return "Mobility blocker"
+}
 
 function mapStepToIndex(step: string) {
   const normalized = step.toLowerCase()
@@ -64,6 +97,8 @@ export function AnalyzeSetup() {
   const {
     setBbox,
     pushView,
+    setAnalysisAnchor,
+    setAnalysisAnchorPoiId,
     setAnalysisStatus,
     setCurrentStep,
     setAnalysisJobId,
@@ -78,6 +113,8 @@ export function AnalyzeSetup() {
     }
     setBbox(viewBbox)
     void mapManager.setBBoxDisplayMode("outline")
+    setAnalysisAnchor(null)
+    setAnalysisAnchorPoiId(null)
     setAnalysisJobId(null)
     setAnalysisPayload(null)
     setAnalysisStatus("loading")
@@ -94,7 +131,7 @@ export function AnalyzeSetup() {
         <div className="pt-4 mb-4 rounded-[20px] bg-white/90 p-4 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
           <p className="text-[14px] font-medium text-[#1D1D1F] mb-1">Analyze Current Map View</p>
           <p className="text-[13px] font-normal text-[#86868B]">
-            Zoom or pan the map, then run analysis on everything visible on screen.
+            POI click analysis is preferred. You can also run a manual accessibility scan on the current view.
           </p>
         </div>
 
@@ -112,6 +149,8 @@ export function AnalyzeSetup() {
 export function AnalyzeLoading() {
   const {
     bboxSelected,
+    analysisAnchor,
+    analysisAnchorPoiId,
     setAnalysisStatus,
     setCurrentStep,
     currentStep,
@@ -133,7 +172,7 @@ export function AnalyzeLoading() {
 
       try {
         setCurrentStep(0)
-        const { job_id } = await analyze(bboxSelected)
+        const { job_id } = await analyze(bboxSelected, analysisAnchor, analysisAnchorPoiId)
         if (cancelled) return
         setAnalysisJobId(job_id)
 
@@ -178,6 +217,8 @@ export function AnalyzeLoading() {
     }
   }, [
     bboxSelected,
+    analysisAnchor,
+    analysisAnchorPoiId,
     pushView,
     setAnalysisJobId,
     setAnalysisPayload,
@@ -271,11 +312,11 @@ export function AnalyzeResults() {
     })
   }, [])
 
-  const radiusKm = useMemo(() => {
-    if (radius === "2km") return 2
-    if (radius === "5km") return 5
-    if (radius === "10km") return 10
-    if (radius === "25km") return 25
+  const radiusMeters = useMemo(() => {
+    if (radius === "500m") return 500
+    if (radius === "1000m") return 1000
+    if (radius === "5000m") return 5000
+    if (radius === "20000m") return 20000
     return null
   }, [radius])
 
@@ -284,14 +325,14 @@ export function AnalyzeResults() {
 
     const filtered = candidates.filter((candidate) => {
       const userDistance = userLocation
-        ? haversineKm(userLocation, [candidate.lng, candidate.lat])
+        ? haversineMeters(userLocation, [candidate.lng, candidate.lat])
         : null
       const withinRadius =
         radius === "viewport"
           ? viewportBBox
             ? isPointInBbox(candidate.lng, candidate.lat, viewportBBox)
             : true
-          : radiusKm === null || (userDistance !== null && userDistance <= radiusKm)
+          : radiusMeters === null || (userDistance !== null && userDistance <= radiusMeters)
       const typeMatch = filterTypes.length === 0 || filterTypes.includes(candidate.type)
       const confidenceMatch =
         filterConfidence.length === 0 || filterConfidence.includes(candidate.confidence)
@@ -299,16 +340,20 @@ export function AnalyzeResults() {
     })
 
     return [...filtered].sort((a, b) => {
-      if (sortBy === "impact") return b.gain - a.gain
+      if (sortBy === "impact") return b.score - a.score || b.deltaGeneral - a.deltaGeneral
       if (sortBy === "distance") {
-        const aDistance = userLocation ? haversineKm(userLocation, [a.lng, a.lat]) : Number.POSITIVE_INFINITY
-        const bDistance = userLocation ? haversineKm(userLocation, [b.lng, b.lat]) : Number.POSITIVE_INFINITY
+        const aDistance = userLocation
+          ? haversineMeters(userLocation, [a.lng, a.lat])
+          : Number.POSITIVE_INFINITY
+        const bDistance = userLocation
+          ? haversineMeters(userLocation, [b.lng, b.lat])
+          : Number.POSITIVE_INFINITY
         return aDistance - bDistance
       }
       if (sortBy === "confidence") return confidenceRank[b.confidence] - confidenceRank[a.confidence]
       return 0
     })
-  }, [candidates, filterConfidence, filterTypes, radius, radiusKm, sortBy, userLocation, viewportBBox])
+  }, [candidates, filterConfidence, filterTypes, radius, radiusMeters, sortBy, userLocation, viewportBBox])
 
   const toggleType = (type: string) => {
     if (filterTypes.includes(type)) {
@@ -328,7 +373,7 @@ export function AnalyzeResults() {
 
   return (
     <div className="flex flex-col h-full">
-      <PanelHeader title="Nearby Barrier Removals" />
+      <PanelHeader title="Top Access Blockers" />
       <div className="flex-1 overflow-y-auto panel-scroll px-4 pb-6">
         <p className="text-[13px] font-normal text-[#86868B] pt-3 pb-2 px-1">
           {radius === "viewport" ? "Within current viewport" : `Within ${radius} of your location`}
@@ -340,10 +385,10 @@ export function AnalyzeResults() {
             onChange={setRadius}
             options={[
               { value: "viewport", label: "Viewport" },
-              { value: "2km", label: "2 km" },
-              { value: "5km", label: "5 km" },
-              { value: "10km", label: "10 km" },
-              { value: "25km", label: "25 km" },
+              { value: "500m", label: "500 m" },
+              { value: "1000m", label: "1000 m" },
+              { value: "5000m", label: "5000 m" },
+              { value: "20000m", label: "20000 m" },
             ]}
             icon={<ChevronDown className="h-3 w-3" />}
           />
@@ -375,9 +420,13 @@ export function AnalyzeResults() {
             <p className="text-[12px] font-semibold text-[#86868B] uppercase tracking-[0.06em] mb-2">Type</p>
             <div className="flex flex-wrap gap-1.5 mb-3">
               {[
-                { label: "Dam", value: "dam" },
-                { label: "Weir", value: "weir" },
-                { label: "Waterfall", value: "waterfall" },
+                { label: "Stairs", value: "stairs" },
+                { label: "Raised kerb", value: "raised_kerb" },
+                { label: "Steep incline", value: "steep_incline" },
+                { label: "Rough surface", value: "rough_surface" },
+                { label: "Wheelchair=no", value: "wheelchair_no" },
+                { label: "Access restricted", value: "access_no" },
+                { label: "Report-derived", value: "report" },
               ].map((item) => (
                 <button
                   key={item.value}
@@ -420,7 +469,9 @@ export function AnalyzeResults() {
             const Icon = barrierTypeIcons[barrier.type] || AlertTriangle
             const color = barrierTypeColors[barrier.type] || "#86868B"
             const conf = confidenceColors[barrier.confidence]
-            const userDistance = userLocation ? haversineKm(userLocation, [barrier.lng, barrier.lat]) : null
+            const userDistance = userLocation
+              ? haversineMeters(userLocation, [barrier.lng, barrier.lat])
+              : null
             return (
               <button
                 key={barrier.id}
@@ -438,16 +489,21 @@ export function AnalyzeResults() {
                   <Icon className="h-[15px] w-[15px]" style={{ color }} strokeWidth={1.5} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-[15px] font-medium text-[#1D1D1F] truncate">{barrier.name}</p>
+                  <p className="text-[15px] font-medium text-[#1D1D1F] truncate">
+                    {barrier.name || blockerTypeLabel(barrier.type)}
+                  </p>
                   <div className="flex items-center gap-2 mt-0.5">
                     <span className="text-[12px] font-semibold text-[#34C759]">
-                      +{barrier.gain} km
+                      +{Math.max(0, Math.round(barrier.gain))} m unlock
                     </span>
                     <span
                       className="text-[12px] font-normal"
                       style={{ color: userDistance === null ? "#8E8E93" : "#007AFF" }}
                     >
-                      {userDistance === null ? "N/A" : `${userDistance.toFixed(1)} km`}
+                      {formatMeters(userDistance)}
+                    </span>
+                    <span className="text-[12px] font-semibold text-[#0A84FF]">
+                      Δ {formatScoreDelta(barrier.deltaGeneral)}
                     </span>
                     <span
                       className="inline-flex h-[18px] items-center rounded-[6px] px-1.5 text-[10px] font-semibold uppercase tracking-wide"
@@ -486,11 +542,11 @@ export function BarrierDetails() {
   const Icon = barrierTypeIcons[b.type] || AlertTriangle
   const color = barrierTypeColors[b.type] || "#86868B"
   const conf = confidenceColors[b.confidence]
-  const distanceFromUser = userLocation ? haversineKm(userLocation, [b.lng, b.lat]) : null
+  const distanceFromUser = userLocation ? haversineMeters(userLocation, [b.lng, b.lat]) : null
   const calculationMethod =
     b.calculationMethod ??
     analysisPayload?.meta.calculation_method ??
-    "This run used DEM-first flow orientation."
+    "General accessibility scoring based on network continuity and reachable opportunities."
 
   const handleCopyLink = async () => {
     try {
@@ -524,7 +580,7 @@ export function BarrierDetails() {
             <Icon className="h-[18px] w-[18px]" style={{ color }} strokeWidth={1.5} />
           </div>
           <div>
-            <p className="text-[13px] font-medium text-[#86868B] capitalize">{b.type}</p>
+            <p className="text-[13px] font-medium text-[#86868B] capitalize">{blockerTypeLabel(b.type)}</p>
             <span
               className="inline-flex h-[18px] items-center rounded-[6px] px-1.5 text-[10px] font-semibold uppercase tracking-wide"
               style={{ backgroundColor: conf.bg, color: conf.text }}
@@ -535,14 +591,42 @@ export function BarrierDetails() {
         </div>
 
         <div className="grid grid-cols-2 gap-2 mb-4">
-          <MetricCard label="Connectivity gain" value={`+${b.gain} km`} accent="#34C759" />
-          <MetricCard label="Upstream blocked" value={`${b.upstreamBlocked} km`} accent="#FF9F0A" />
+          <MetricCard label="Accessible unlock" value={`+${Math.max(0, Math.round(b.gain))} m`} accent="#34C759" />
+          <MetricCard label="Blocked segment" value={`${Math.max(0, Math.round(b.upstreamBlocked))} m`} accent="#FF9F0A" />
           <MetricCard
             label="Distance"
-            value={distanceFromUser === null ? "N/A" : `${distanceFromUser.toFixed(1)} km`}
+            value={formatMeters(distanceFromUser)}
             accent={distanceFromUser === null ? "#8E8E93" : "#007AFF"}
           />
+          <MetricCard label="General index Δ" value={formatScoreDelta(b.deltaGeneral)} accent="#0A84FF" />
+          <MetricCard label="NAS Δ" value={formatScoreDelta(b.deltaNas)} accent="#5856D6" />
+          <MetricCard label="OAS Δ" value={formatScoreDelta(b.deltaOas)} accent="#14B8A6" />
+          <MetricCard label="Destinations unlocked" value={String(b.unlockedPoiCount)} accent="#0A84FF" />
           <MetricCard label="OSM ID" value={b.osmId.split("/")[1]} accent="#8E8E93" />
+        </div>
+
+        <div className="rounded-[20px] bg-white/90 p-4 shadow-[0_1px_4px_rgba(0,0,0,0.04)] mb-4">
+          <p className="text-[12px] font-semibold text-[#86868B] uppercase tracking-[0.06em] mb-2">
+            Why this blocker matters
+          </p>
+          <p className="text-[14px] font-normal text-[#1D1D1F] mb-2">
+            {b.reason ?? "Fixing this blocker reconnects a disconnected pedestrian component."}
+          </p>
+          <p className="text-[12px] text-[#86868B]">
+            Baseline index {b.baselineIndex.toFixed(1)} -> Post-fix index {b.postFixIndex.toFixed(1)}
+          </p>
+          {Object.keys(b.unlockedDestinationCounts).length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {Object.entries(b.unlockedDestinationCounts).map(([kind, count]) => (
+                <span
+                  key={kind}
+                  className="rounded-[8px] bg-[#F2F2F7] px-2 py-0.5 text-[11px] font-medium text-[#1D1D1F]"
+                >
+                  {count} {kind}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="rounded-[20px] bg-white/90 p-4 shadow-[0_1px_4px_rgba(0,0,0,0.04)] mb-4">
