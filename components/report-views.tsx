@@ -9,8 +9,18 @@ import { mapManager } from "@/lib/map/manager"
 import { MapPin, CheckCircle2, ChevronDown } from "lucide-react"
 import { toast } from "sonner"
 
-const defaultCategories = ["Dam", "Weir", "Waterfall", "Other"]
-const barrierCategories = ["Incorrect barrier", "Other"]
+const defaultCategories = [
+  "Blocked sidewalk",
+  "Broken curb ramp",
+  "No curb ramp",
+  "Elevator out of service",
+  "Construction detour",
+  "Flooded path",
+  "Unsafe crossing",
+  "Accessibility issue",
+  "Other",
+]
+const barrierCategories = ["Incorrect blocker", "Accessibility issue", "Other"]
 
 export function ReportForm() {
   const {

@@ -93,7 +93,7 @@ export function IconRail({ collapsed, onToggleCollapse }: IconRailProps) {
           {!collapsed && (
             <>
               <span className="text-[18px] font-semibold tracking-[-0.01em] text-[#1D1D1F] whitespace-nowrap leading-none flex-1">
-                StreamMaps
+                AccessMaps
               </span>
               <button
                 onClick={onToggleCollapse}
@@ -134,6 +134,7 @@ export function IconRail({ collapsed, onToggleCollapse }: IconRailProps) {
                   className={`flex items-center rounded-[9px] transition-colors duration-150 hover:bg-[#767680]/[0.08] ${
                     collapsed ? "w-[42px] h-[42px] justify-center" : "h-[42px] w-full pr-[9px] text-left"
                   }`}
+                  aria-label={label}
                   aria-pressed={isActive}
                 >
                   <div className="flex h-[42px] w-[42px] items-center justify-center flex-shrink-0">

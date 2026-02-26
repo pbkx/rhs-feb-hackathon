@@ -598,9 +598,9 @@ export function BarrierDetails() {
             value={formatMeters(distanceFromUser)}
             accent={distanceFromUser === null ? "#8E8E93" : "#007AFF"}
           />
-          <MetricCard label="General index Δ" value={formatScoreDelta(b.deltaGeneral)} accent="#0A84FF" />
-          <MetricCard label="NAS Δ" value={formatScoreDelta(b.deltaNas)} accent="#5856D6" />
-          <MetricCard label="OAS Δ" value={formatScoreDelta(b.deltaOas)} accent="#14B8A6" />
+          <MetricCard label="General index Delta" value={formatScoreDelta(b.deltaGeneral)} accent="#0A84FF" />
+          <MetricCard label="NAS Delta" value={formatScoreDelta(b.deltaNas)} accent="#5856D6" />
+          <MetricCard label="OAS Delta" value={formatScoreDelta(b.deltaOas)} accent="#14B8A6" />
           <MetricCard label="Destinations unlocked" value={String(b.unlockedPoiCount)} accent="#0A84FF" />
           <MetricCard label="OSM ID" value={b.osmId.split("/")[1]} accent="#8E8E93" />
         </div>
@@ -612,9 +612,7 @@ export function BarrierDetails() {
           <p className="text-[14px] font-normal text-[#1D1D1F] mb-2">
             {b.reason ?? "Fixing this blocker reconnects a disconnected pedestrian component."}
           </p>
-          <p className="text-[12px] text-[#86868B]">
-            Baseline index {b.baselineIndex.toFixed(1)} -> Post-fix index {b.postFixIndex.toFixed(1)}
-          </p>
+          <p className="text-[12px] text-[#86868B]">{`Baseline index ${b.baselineIndex.toFixed(1)} to post-fix index ${b.postFixIndex.toFixed(1)}`}</p>
           {Object.keys(b.unlockedDestinationCounts).length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1">
               {Object.entries(b.unlockedDestinationCounts).map(([kind, count]) => (

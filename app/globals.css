@@ -231,24 +231,41 @@
     0 1px 6px rgba(0, 0, 0, 0.25);
 }
 
-.barrier-pin--dam {
+.barrier-pin--stairs {
   --pin-color: #ff6b35;
   --pin-rgb: 255, 107, 53;
 }
 
-.barrier-pin--weir {
+.barrier-pin--raised_kerb {
   --pin-color: #0a84ff;
   --pin-rgb: 10, 132, 255;
 }
 
-.barrier-pin--waterfall {
-  --pin-color: #30d158;
-  --pin-rgb: 48, 209, 88;
+.barrier-pin--steep_incline {
+  --pin-color: #a855f7;
+  --pin-rgb: 168, 85, 247;
+}
+
+.barrier-pin--rough_surface,
+.barrier-pin--wheelchair_limited {
+  --pin-color: #f59e0b;
+  --pin-rgb: 245, 158, 11;
+}
+
+.barrier-pin--wheelchair_no,
+.barrier-pin--access_no {
+  --pin-color: #dc2626;
+  --pin-rgb: 220, 38, 38;
 }
 
 .barrier-pin--report {
-  --pin-color: #ff3b30;
-  --pin-rgb: 255, 59, 48;
+  --pin-color: #06b6d4;
+  --pin-rgb: 6, 182, 212;
+}
+
+.barrier-pin--other {
+  --pin-color: #6b7280;
+  --pin-rgb: 107, 114, 128;
 }
 
 .barrier-pin.is-selected .barrier-pin__inner {
@@ -296,6 +313,15 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+
   .barrier-pin.is-animating .barrier-pin__inner {
     animation: none;
   }

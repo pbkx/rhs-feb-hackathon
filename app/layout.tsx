@@ -2,8 +2,8 @@ import type { Metadata, Viewport } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'StreamMaps',
-  description: 'A website which analyzes stream connection barriers',
+  title: 'AccessMaps',
+  description: 'A website that analyzes mobility blockers and accessibility impact',
 }
 
 export const viewport: Viewport = {

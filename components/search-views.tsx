@@ -7,7 +7,7 @@ import { getReports, submitReportFeedback, search as searchApi, type ReportRecor
 import { copyTextToClipboard } from "@/lib/clipboard"
 import { mapManager } from "@/lib/map/manager"
 import { reportDisplayId } from "@/lib/report-id"
-import { haversineKm } from "@/lib/haversine"
+import { haversineMeters } from "@/lib/haversine"
 import { PanelHeader } from "@/components/panel-header"
 import { MetricCard, SelectPill } from "@/components/view-helpers"
 import {
@@ -23,9 +23,9 @@ import {
 } from "lucide-react"
 
 const findNearbyItems = [
-  { key: "barriers", label: "Nearby Barriers", icon: AlertTriangle, bgColor: "#FF9500", iconColor: "#FFFFFF" },
+  { key: "barriers", label: "Nearby Blockers", icon: AlertTriangle, bgColor: "#FF9500", iconColor: "#FFFFFF" },
   { key: "reports", label: "Nearby Reports", icon: MapPin, bgColor: "#FF3B30", iconColor: "#FFFFFF" },
-  { key: "high-impact", label: "High-impact Candidates", icon: Crosshair, bgColor: "#007AFF", iconColor: "#FFFFFF" },
+  { key: "high-impact", label: "Highest Impact", icon: Crosshair, bgColor: "#007AFF", iconColor: "#FFFFFF" },
 ]
 
 const reportConfidenceColors: Record<ReportRecord["confidence"], { bg: string; text: string; rank: number }> = {
@@ -64,6 +64,8 @@ export function SearchHome() {
     setActiveMode,
     resetNav,
     setSortBy,
+    setAnalysisAnchor,
+    setAnalysisAnchorPoiId,
     setFilterTypes,
     setBbox,
     setAnalysisStatus,
@@ -137,7 +139,14 @@ export function SearchHome() {
     resetNav("AnalyzeResults")
     setSortBy("impact")
     if (type === "barriers") {
-      setFilterTypes(["dam", "weir", "waterfall"])
+      setFilterTypes([
+        "stairs",
+        "raised_kerb",
+        "steep_incline",
+        "rough_surface",
+        "wheelchair_no",
+        "access_no",
+      ])
     } else {
       setFilterTypes([])
     }
@@ -193,6 +202,8 @@ export function SearchHome() {
     }
     setBbox(bbox)
     void mapManager.setBBoxDisplayMode("outline")
+    setAnalysisAnchor(null)
+    setAnalysisAnchorPoiId(null)
     setAnalysisJobId(null)
     setAnalysisPayload(null)
     setAnalysisStatus("loading")
@@ -373,9 +384,9 @@ export function SearchResults() {
         return reportConfidenceColors[b.confidence].rank - reportConfidenceColors[a.confidence].rank
       }
       const aDistance =
-        userLocation && a.coordinates ? haversineKm(userLocation, a.coordinates) : Number.POSITIVE_INFINITY
+        userLocation && a.coordinates ? haversineMeters(userLocation, a.coordinates) : Number.POSITIVE_INFINITY
       const bDistance =
-        userLocation && b.coordinates ? haversineKm(userLocation, b.coordinates) : Number.POSITIVE_INFINITY
+        userLocation && b.coordinates ? haversineMeters(userLocation, b.coordinates) : Number.POSITIVE_INFINITY
       return aDistance - bDistance
     })
     return copy
@@ -405,7 +416,7 @@ export function SearchResults() {
               {sortedReportResults.map((report) => {
                 const conf = reportConfidenceColors[report.confidence]
                 const distance =
-                  userLocation && report.coordinates ? haversineKm(userLocation, report.coordinates) : null
+                  userLocation && report.coordinates ? haversineMeters(userLocation, report.coordinates) : null
                 const description =
                   report.description.length > 56
                     ? `${report.description.slice(0, 53)}...`
@@ -448,7 +459,7 @@ export function SearchResults() {
                           className="text-[12px] font-normal"
                           style={{ color: distance === null ? "#8E8E93" : "#007AFF" }}
                         >
-                          {distance === null ? "N/A" : `${distance.toFixed(1)} km`}
+                          {distance === null ? "N/A" : `${Math.round(distance)} m`}
                         </span>
                         <span
                           className="inline-flex h-[18px] items-center rounded-[6px] px-1.5 text-[10px] font-semibold uppercase tracking-wide"
@@ -553,9 +564,9 @@ export function ReportDetails() {
   const lastConfirmed = report.last_confirmed_at
     ? new Date(report.last_confirmed_at).toLocaleString()
     : "Not confirmed yet"
-  const distanceKm =
+  const distanceMeters =
     userLocation && report.coordinates
-      ? haversineKm(userLocation, report.coordinates)
+      ? haversineMeters(userLocation, report.coordinates)
       : null
   const confidenceChip = reportConfidenceColors[report.confidence]
 
@@ -664,8 +675,8 @@ export function ReportDetails() {
           <MetricCard label="Renouncements" value={String(report.renouncements)} accent="#FF3B30" />
           <MetricCard
             label="Distance"
-            value={distanceKm === null ? "N/A" : `${distanceKm.toFixed(1)} km`}
-            accent={distanceKm === null ? "#8E8E93" : "#007AFF"}
+            value={distanceMeters === null ? "N/A" : `${Math.round(distanceMeters)} m`}
+            accent={distanceMeters === null ? "#8E8E93" : "#007AFF"}
           />
           <MetricCard label="Report ID" value={reportIdNumber} accent="#8E8E93" />
         </div>
