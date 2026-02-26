@@ -2,7 +2,7 @@
 
 import { useAppState, type AppMode } from "@/lib/app-context"
 import { mapManager } from "@/lib/map/manager"
-import { Search, BarChart3, Flag } from "lucide-react"
+import { Search, BarChart3, Flag, Info } from "lucide-react"
 import { useState, useRef, useEffect } from "react"
 import { createPortal } from "react-dom"
 
@@ -10,6 +10,7 @@ const modes: { mode: AppMode; icon: typeof Search; label: string }[] = [
   { mode: "search", icon: Search, label: "Search" },
   { mode: "analyze", icon: BarChart3, label: "Analyze" },
   { mode: "report", icon: Flag, label: "Report" },
+  { mode: "about", icon: Info, label: "About" },
 ]
 
 function Tooltip({ label, anchorEl }: { label: string; anchorEl: HTMLElement | null }) {

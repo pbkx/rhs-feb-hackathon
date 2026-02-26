@@ -503,7 +503,7 @@ export function AnalyzeResults() {
                       {formatMeters(userDistance)}
                     </span>
                     <span className="text-[12px] font-semibold text-[#0A84FF]">
-                      Δ {formatScoreDelta(barrier.deltaGeneral)}
+                      Delta {formatScoreDelta(barrier.deltaGeneral)}
                     </span>
                     <span
                       className="inline-flex h-[18px] items-center rounded-[6px] px-1.5 text-[10px] font-semibold uppercase tracking-wide"

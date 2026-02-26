@@ -7,6 +7,7 @@ import { MapContainer } from "@/components/map-container"
 import { SearchHome, SearchResults, ReportDetails } from "@/components/search-views"
 import { AnalyzeSetup, AnalyzeLoading, AnalyzeResults, BarrierDetails } from "@/components/analyze-views"
 import { ReportForm, ReportSuccess } from "@/components/report-views"
+import { AboutInfo } from "@/components/about-view"
 
 const viewComponents: Record<string, React.ComponentType> = {
   SearchHome,
@@ -18,6 +19,7 @@ const viewComponents: Record<string, React.ComponentType> = {
   BarrierDetails,
   ReportForm,
   ReportSuccess,
+  AboutInfo,
 }
 
 export function AppShell() {

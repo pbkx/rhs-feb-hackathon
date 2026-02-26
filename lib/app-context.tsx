@@ -3,7 +3,7 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from "react"
 import type { AnalyzeResultPayload, ReportRecord } from "@/lib/api/client"
 
-export type AppMode = "search" | "analyze" | "report"
+export type AppMode = "search" | "analyze" | "report" | "about"
 type AnalysisStatus = "idle" | "loading" | "done" | "error"
 export type BBox = [number, number, number, number]
 
@@ -179,6 +179,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         search: "SearchHome",
         analyze: "AnalyzeSetup",
         report: "ReportForm",
+        about: "AboutInfo",
       }
       setNavStack([rootViews[mode]])
     }
