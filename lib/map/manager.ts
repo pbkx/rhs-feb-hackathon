@@ -38,6 +38,9 @@ const LAYER_USER_ACCURACY_BASE = "user-accuracy-base-layer"
 const LAYER_USER_ACCURACY = "user-accuracy-layer"
 const LAYER_USER_ACCURACY_STROKE = "user-accuracy-stroke-layer"
 
+const MARKER_FADE_OUT_ZOOM = 10.0
+const MARKER_FADE_IN_ZOOM = 11.6
+
 const emptyPointCollection = (): FeatureCollection<Point> => ({
   type: "FeatureCollection",
   features: [],
@@ -47,6 +50,11 @@ const emptyLineCollection = (): FeatureCollection<LineString> => ({
   type: "FeatureCollection",
   features: [],
 })
+
+function smoothstep01(value: number) {
+  const t = Math.max(0, Math.min(1, value))
+  return t * t * (3 - 2 * t)
+}
 
 interface SharedBarrierPreview {
   id: string
@@ -436,17 +444,10 @@ class MapManager {
         type: "line",
         source: SOURCE_STREAMS,
         paint: {
-          "line-color": [
-            "match",
-            ["get", "status"],
-            "BLOCKED",
-            "#DC2626",
-            "LIMITED",
-            "#D97706",
-            "#9CA3AF",
-          ],
-          "line-width": 2,
-          "line-opacity": 0.55,
+          // Faint background network so before/after overlays stay dominant.
+          "line-color": "#94A3B8",
+          "line-width": 1.4,
+          "line-opacity": 0.22,
         },
       },
       SOURCE_STREAMS
@@ -459,9 +460,9 @@ class MapManager {
         source: SOURCE_BLOCKED,
         paint: {
           "line-color": "#DC2626",
-          "line-width": 3,
-          "line-opacity": 0.8,
-          "line-dasharray": [2, 1.2],
+          "line-width": 3.4,
+          "line-opacity": 0.95,
+          "line-dasharray": [1.8, 1.1],
         },
       },
       SOURCE_BLOCKED
@@ -473,19 +474,10 @@ class MapManager {
         type: "line",
         source: SOURCE_ACCESSIBLE,
         paint: {
-          "line-color": [
-            "interpolate",
-            ["linear"],
-            ["coalesce", ["to-number", ["get", "quality_score"]], 0.2],
-            0,
-            "#F97316",
-            0.5,
-            "#FACC15",
-            1,
-            "#22C55E",
-          ],
-          "line-width": 2.3,
-          "line-opacity": 0.76,
+          // Locked routes (not currently unlocked by selected blocker).
+          "line-color": "#6B7280",
+          "line-width": 2.6,
+          "line-opacity": 0.72,
         },
       },
       SOURCE_ACCESSIBLE
@@ -497,11 +489,16 @@ class MapManager {
         type: "line",
         source: SOURCE_ACCESSIBLE,
         paint: {
+          // Before: routes reachable from the anchor before fixing a blocker.
           "line-color": "#2563EB",
-          "line-width": 4.2,
-          "line-opacity": 0.72,
+          "line-width": 4.4,
+          "line-opacity": 0.86,
         },
-        filter: ["==", ["get", "is_base_component"], true],
+        filter: [
+          "any",
+          ["==", ["get", "is_base_component"], true],
+          ["==", ["to-string", ["get", "is_base_component"]], "true"],
+        ],
       },
       SOURCE_ACCESSIBLE
     )
@@ -512,9 +509,10 @@ class MapManager {
         type: "line",
         source: SOURCE_ACCESSIBLE,
         paint: {
+          // After: routes newly unlocked by the selected blocker.
           "line-color": "#10B981",
-          "line-width": 4.6,
-          "line-opacity": 0.88,
+          "line-width": 4.8,
+          "line-opacity": 0.95,
         },
         filter: ["==", ["get", "component_id"], -1],
       },
@@ -585,7 +583,7 @@ class MapManager {
             "wheelchair_limited",
             "#F59E0B",
             "report",
-            "#06B6D4",
+            "#DC2626",
             "#FF6B35",
           ],
           "circle-stroke-width": 2,
@@ -1078,9 +1076,21 @@ class MapManager {
   private markerOpacityForZoom() {
     if (!this.map) return 1
     const zoom = this.map.getZoom()
-    if (zoom <= 6.5) return 0
-    if (zoom >= 9) return 1
-    return (zoom - 6.5) / (9 - 6.5)
+    if (zoom <= MARKER_FADE_OUT_ZOOM) return 0
+    if (zoom >= MARKER_FADE_IN_ZOOM) return 1
+    return smoothstep01((zoom - MARKER_FADE_OUT_ZOOM) / (MARKER_FADE_IN_ZOOM - MARKER_FADE_OUT_ZOOM))
+  }
+
+  private applyMarkerOpacity(
+    marker: MapLibreMarker,
+    element: HTMLElement,
+    opacity: number,
+    pointerEvents: string
+  ) {
+    const value = opacity.toFixed(3)
+    marker.setOpacity(value)
+    element.style.opacity = value
+    element.style.pointerEvents = pointerEvents
   }
 
   private createBarrierPinElement(barrierId: string, barrierType: string, label: string) {
@@ -1292,24 +1302,32 @@ class MapManager {
   private syncBarrierMarkerVisibility() {
     const visible = this.layerVisibility.barriers
     const opacity = visible ? this.markerOpacityForZoom() : 0
-    const pointerEvents = visible && opacity > 0.04 ? "auto" : "none"
-    for (const element of this.barrierMarkerElements.values()) {
-      element.style.opacity = opacity.toFixed(3)
-      element.style.pointerEvents = pointerEvents
+    const pointerEvents =
+      this.reportPickActive || !visible || opacity <= 0.04 ? "none" : "auto"
+    for (const [barrierId, marker] of this.barrierMarkers.entries()) {
+      const element = this.barrierMarkerElements.get(barrierId)
+      if (!element) continue
+      this.applyMarkerOpacity(marker, element, opacity, pointerEvents)
     }
-    if (this.sharedBarrierMarkerElement) {
-      this.sharedBarrierMarkerElement.style.opacity = opacity.toFixed(3)
-      this.sharedBarrierMarkerElement.style.pointerEvents = pointerEvents
+    if (this.sharedBarrierMarker && this.sharedBarrierMarkerElement) {
+      this.applyMarkerOpacity(
+        this.sharedBarrierMarker,
+        this.sharedBarrierMarkerElement,
+        opacity,
+        pointerEvents
+      )
     }
   }
 
   private syncReportMarkerVisibility() {
     const visible = this.layerVisibility.reports
     const opacity = visible ? this.markerOpacityForZoom() : 0
-    const pointerEvents = visible && opacity > 0.04 ? "auto" : "none"
-    for (const element of this.reportMarkerElements.values()) {
-      element.style.opacity = opacity.toFixed(3)
-      element.style.pointerEvents = pointerEvents
+    const pointerEvents =
+      this.reportPickActive || !visible || opacity <= 0.04 ? "none" : "auto"
+    for (const [reportId, marker] of this.reportMarkers.entries()) {
+      const element = this.reportMarkerElements.get(reportId)
+      if (!element) continue
+      this.applyMarkerOpacity(marker, element, opacity, pointerEvents)
     }
   }
 
@@ -1328,14 +1346,15 @@ class MapManager {
       this.map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none")
     }
 
-    setVisibility(LAYER_STREAMS, this.layerVisibility.streams)
+    // Route overlays are intentionally disabled for a cleaner map/reporting flow.
+    setVisibility(LAYER_STREAMS, false)
     setVisibility(LAYER_SCORE_GRID_FILL, this.layerVisibility.streams)
     setVisibility(LAYER_SCORE_GRID_LINE, this.layerVisibility.streams)
-    setVisibility(LAYER_BLOCKED, this.layerVisibility.streams)
+    setVisibility(LAYER_BLOCKED, Boolean(this.selectedBarrierId))
     setVisibility(LAYER_POIS, true)
-    setVisibility(LAYER_ACCESSIBLE, this.layerVisibility.accessible)
-    setVisibility(LAYER_ACCESSIBLE_BASE, this.layerVisibility.accessible)
-    setVisibility(LAYER_ACCESSIBLE_UNLOCKED, this.layerVisibility.accessible)
+    setVisibility(LAYER_ACCESSIBLE, false)
+    setVisibility(LAYER_ACCESSIBLE_BASE, false)
+    setVisibility(LAYER_ACCESSIBLE_UNLOCKED, false)
     setVisibility(LAYER_BARRIERS, this.layerVisibility.barriers && useNativeBarrierLayers)
     setVisibility(LAYER_BARRIERS_ICON, this.layerVisibility.barriers && useNativeBarrierLayers)
     setVisibility(LAYER_BARRIERS_GLOW, this.layerVisibility.barriers && useNativeBarrierLayers)
@@ -1365,13 +1384,64 @@ class MapManager {
   }
 
   private applyUnlockedComponentFilter() {
-    if (!this.map || !this.map.isStyleLoaded() || !this.map.getLayer(LAYER_ACCESSIBLE_UNLOCKED)) return
-    this.map.setFilter(
-      LAYER_ACCESSIBLE_UNLOCKED,
-      typeof this.selectedUnlockedComponentId === "number"
-        ? ["==", ["get", "component_id"], this.selectedUnlockedComponentId]
-        : ["==", ["get", "component_id"], -1]
-    )
+    if (!this.map || !this.map.isStyleLoaded()) return
+
+    if (this.map.getLayer(LAYER_ACCESSIBLE_BASE)) {
+      this.map.setFilter(LAYER_ACCESSIBLE_BASE, [
+        "any",
+        ["==", ["get", "is_base_component"], true],
+        ["==", ["to-string", ["get", "is_base_component"]], "true"],
+      ] as any)
+    }
+
+    if (this.map.getLayer(LAYER_ACCESSIBLE_UNLOCKED)) {
+      if (typeof this.selectedUnlockedComponentId === "number") {
+        const unlockedId = String(this.selectedUnlockedComponentId)
+        this.map.setFilter(LAYER_ACCESSIBLE_UNLOCKED, [
+          "==",
+          ["to-string", ["get", "component_id"]],
+          unlockedId,
+        ])
+      } else {
+        this.map.setFilter(LAYER_ACCESSIBLE_UNLOCKED, ["==", ["get", "component_id"], -1])
+      }
+    }
+
+    if (this.map.getLayer(LAYER_ACCESSIBLE)) {
+      if (typeof this.selectedUnlockedComponentId === "number") {
+        const unlockedId = String(this.selectedUnlockedComponentId)
+        this.map.setFilter(LAYER_ACCESSIBLE, [
+          "all",
+          [
+            "!",
+            [
+              "any",
+              ["==", ["get", "is_base_component"], true],
+              ["==", ["to-string", ["get", "is_base_component"]], "true"],
+            ],
+          ],
+          ["!=", ["to-string", ["get", "component_id"]], unlockedId],
+        ] as any)
+      } else {
+        this.map.setFilter(LAYER_ACCESSIBLE, [
+          "!",
+          [
+            "any",
+            ["==", ["get", "is_base_component"], true],
+            ["==", ["to-string", ["get", "is_base_component"]], "true"],
+          ],
+        ] as any)
+      }
+    }
+
+    if (this.map.getLayer(LAYER_BLOCKED)) {
+      if (this.selectedBarrierId && this.selectedBarrierId.startsWith("blk-")) {
+        const selectedEdgeId = this.selectedBarrierId.slice(4)
+        this.map.setFilter(LAYER_BLOCKED, ["==", ["get", "edge_id"], selectedEdgeId])
+      } else {
+        this.map.setFilter(LAYER_BLOCKED, ["==", ["get", "edge_id"], "__none__"])
+      }
+    }
   }
 
   private rebuildAllLayers() {
@@ -1386,14 +1456,17 @@ class MapManager {
       void this.ensureUserLocationMarker()
     }
     
-    // Move barrier layers to top for better visibility
-    if (this.map.getLayer(LAYER_ACCESSIBLE_UNLOCKED)) {
+    // Route order (bottom -> top): unlocked new, old/base, blocked.
+    for (const layerId of [LAYER_ACCESSIBLE_UNLOCKED, LAYER_ACCESSIBLE_BASE, LAYER_BLOCKED]) {
+      if (!this.map.getLayer(layerId)) continue
       try {
-        this.map.moveLayer(LAYER_ACCESSIBLE_UNLOCKED)
+        this.map.moveLayer(layerId)
       } catch {
-        // Layer already on top or error
+        // Layer already in position or unavailable
       }
     }
+
+    // Keep interaction layers above route overlays.
     if (this.map.getLayer(LAYER_POIS)) {
       try {
         this.map.moveLayer(LAYER_POIS)
@@ -1443,6 +1516,8 @@ class MapManager {
     void this.setReportMarker(point)
     this.reportPickActive = false
     this.updateCursor()
+    this.syncBarrierMarkerVisibility()
+    this.syncReportMarkerVisibility()
     const handler = this.reportPickHandler
     this.reportPickHandler = null
     handler?.(point)
@@ -1577,6 +1652,7 @@ class MapManager {
     this.selectedBarrierId = barrierId
     this.selectedUnlockedComponentId = this.findUnlockedComponentForBarrier(barrierId)
     await this.initialize()
+    this.applyLayerVisibility()
     this.applySelectedBarrierFilter()
     this.applyUnlockedComponentFilter()
     this.syncBarrierMarkerSelection()
@@ -1593,6 +1669,7 @@ class MapManager {
     await this.initialize()
     this.selectedBarrierId = barrierId
     this.selectedUnlockedComponentId = this.findUnlockedComponentForBarrier(barrierId)
+    this.applyLayerVisibility()
     this.applySelectedBarrierFilter()
     this.applyUnlockedComponentFilter()
     this.syncBarrierMarkerSelection()
@@ -1802,6 +1879,8 @@ class MapManager {
     this.reportPickActive = enabled
     this.reportPickHandler = enabled ? handler ?? null : null
     this.updateCursor()
+    this.syncBarrierMarkerVisibility()
+    this.syncReportMarkerVisibility()
   }
 }
 

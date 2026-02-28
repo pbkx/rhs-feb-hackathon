@@ -192,6 +192,9 @@ interface CandidateInternal {
   unlocked_component_id: number | null
   confidence: Confidence
   osm_id: string
+  reports_count?: number
+  renouncements?: number
+  report_ids?: string[]
   tags: Record<string, string>
   inferred_signals: string[]
   report_signal_count: number
@@ -215,7 +218,18 @@ interface ReportSignal {
   category: string
   confidence: Confidence
   effective_reports: number
+  reports_count: number
+  renouncements: number
   coordinates: Coord
+}
+
+interface ReportEdgeEvidence {
+  effective_reports: number
+  reports_count: number
+  renouncements: number
+  confidence: Confidence
+  categories: Set<string>
+  report_ids: Set<string>
 }
 
 interface AccessibilityScores {
@@ -289,6 +303,54 @@ function nearestGraphNode(
   }
   if (bestNode === null || bestDistance > maxDistanceM) return null
   return { node_id: bestNode, distance_m: bestDistance }
+}
+
+function reportCategoryIsHard(category: string) {
+  return HARD_REPORT_CATEGORIES.has(category.toLowerCase().trim())
+}
+
+function edgeDistanceToPointMeters(edge: PedestrianEdge, point: Coord) {
+  return Math.min(
+    haversineMeters(edge.mid_coord, point),
+    haversineMeters(edge.from_coord, point),
+    haversineMeters(edge.to_coord, point)
+  )
+}
+
+function nearestEdgeIndex(
+  point: Coord,
+  edges: PedestrianEdge[],
+  index: SpatialHash<number>,
+  maxDistanceM: number,
+  includeAlreadyBlocked = false
+): { edge_index: number; distance_m: number } | null {
+  const { latDelta, lonDelta } = pointRadiusDegrees(point, maxDistanceM)
+  const nearby = index.queryBBox(
+    point[0] - lonDelta,
+    point[1] - latDelta,
+    point[0] + lonDelta,
+    point[1] + latDelta
+  )
+  if (nearby.length === 0) return null
+
+  let bestEdgeIndex: number | null = null
+  let bestDistance = Number.POSITIVE_INFINITY
+
+  for (const edgeIndex of nearby) {
+    const edge = edges[edgeIndex]
+    if (!edge) continue
+    if (!includeAlreadyBlocked && edge.classification.status === "BLOCKED") continue
+    const distance = edgeDistanceToPointMeters(edge, point)
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestEdgeIndex = edgeIndex
+    }
+  }
+
+  if (bestEdgeIndex === null || !Number.isFinite(bestDistance) || bestDistance > maxDistanceM) {
+    return null
+  }
+  return { edge_index: bestEdgeIndex, distance_m: bestDistance }
 }
 
 function bruteForceNearestNode(point: Coord, nodeById: Map<number, OverpassNode>) {
@@ -630,7 +692,7 @@ function buildScoreGridGeojson(
 }
 
 function toPublicCandidate(candidate: CandidateInternal): AccessBlockerCandidate {
-  return {
+  const output: AccessBlockerCandidate = {
     blocker_id: candidate.blocker_id,
     barrier_id: candidate.barrier_id,
     blocker_type: candidate.blocker_type,
@@ -660,6 +722,16 @@ function toPublicCandidate(candidate: CandidateInternal): AccessBlockerCandidate
     lat: Number(candidate.lat.toFixed(6)),
     lon: Number(candidate.lon.toFixed(6)),
   }
+  if (typeof candidate.reports_count === "number" && Number.isFinite(candidate.reports_count)) {
+    output.reports_count = Math.max(0, Math.round(candidate.reports_count))
+  }
+  if (typeof candidate.renouncements === "number" && Number.isFinite(candidate.renouncements)) {
+    output.renouncements = Math.max(0, Math.round(candidate.renouncements))
+  }
+  if (Array.isArray(candidate.report_ids) && candidate.report_ids.length > 0) {
+    output.report_ids = [...new Set(candidate.report_ids)]
+  }
+  return output
 }
 
 export function runAnalysisPipeline(
@@ -730,6 +802,81 @@ export function runAnalysisPipeline(
         classification,
         location_label: formatLocationLabel(tags, midCoord[0], midCoord[1]),
       })
+    }
+  }
+
+  const reportSignals: ReportSignal[] = (options.reports ?? [])
+    .filter(
+      (report): report is AggregatedReport & { coordinates: Coord } =>
+        report.effective_reports > 0 &&
+        Array.isArray(report.coordinates) &&
+        report.coordinates.length === 2
+    )
+    .map((report) => ({
+      report_id: report.report_id,
+      category: report.category,
+      confidence: report.confidence,
+      effective_reports: report.effective_reports,
+      reports_count: report.reports_count,
+      renouncements: report.renouncements,
+      coordinates: report.coordinates,
+    }))
+
+  const edgeIndex = new SpatialHash<number>(0.01, 0.01)
+  edges.forEach((edge, index) => edgeIndex.insertPoint(edge.mid_coord, index))
+
+  const reportEvidenceByEdge = new Map<string, ReportEdgeEvidence>()
+  const reportMatchedByEdgeIds = new Set<string>()
+  for (const report of reportSignals) {
+    if (!reportCategoryIsHard(report.category)) continue
+
+    const nearest = nearestEdgeIndex(
+      report.coordinates,
+      edges,
+      edgeIndex,
+      MAX_REPORT_SNAP_DISTANCE_M,
+      false
+    )
+    if (!nearest) continue
+
+    const edge = edges[nearest.edge_index]
+    if (!edge) continue
+
+    const current = reportEvidenceByEdge.get(edge.edge_id)
+    if (current) {
+      current.effective_reports += report.effective_reports
+      current.reports_count += report.reports_count
+      current.renouncements += report.renouncements
+      current.confidence = bumpConfidence(current.confidence, report.confidence)
+      current.categories.add(report.category)
+      current.report_ids.add(report.report_id)
+    } else {
+      reportEvidenceByEdge.set(edge.edge_id, {
+        effective_reports: report.effective_reports,
+        reports_count: report.reports_count,
+        renouncements: report.renouncements,
+        confidence: report.confidence,
+        categories: new Set([report.category]),
+        report_ids: new Set([report.report_id]),
+      })
+    }
+    reportMatchedByEdgeIds.add(report.report_id)
+  }
+
+  for (const edge of edges) {
+    const evidence = reportEvidenceByEdge.get(edge.edge_id)
+    if (!evidence) continue
+    const categoryPreview = [...evidence.categories].slice(0, 3).join(", ")
+    edge.classification = {
+      status: "BLOCKED",
+      blocker_type: "report",
+      confidence: bumpConfidence(edge.classification.confidence, evidence.confidence),
+      inferred_signals: [
+        ...edge.classification.inferred_signals,
+        `Community reports indicate a blocker (${evidence.reports_count} reports, ${evidence.renouncements} renouncements).`,
+        ...(categoryPreview ? [`Reported categories: ${categoryPreview}.`] : []),
+      ],
+      quality_score: 0,
     }
   }
 
@@ -908,9 +1055,26 @@ export function runAnalysisPipeline(
     const deltaGeneral = postGeneral - baselineGeneralScore
 
     const blockerType = edge.classification.blocker_type ?? "other"
+    const reportEvidence =
+      blockerType === "report" ? reportEvidenceByEdge.get(edge.edge_id) : undefined
+    const reportSignalCount = reportEvidence?.effective_reports ?? 0
     const fixPenalty = blockerFixCostPenalty(blockerType)
     const confidenceBoost = confidenceBonus(edge.classification.confidence)
     const score = deltaGeneral * 3 + unlockMeters / 750 + confidenceBoost - fixPenalty
+    const reportSummary =
+      reportEvidence && reportEvidence.categories.size > 0
+        ? [...reportEvidence.categories].slice(0, 3).join(", ")
+        : ""
+    const reason =
+      blockerType === "report" && reportEvidence
+        ? `Community reports (${reportEvidence.reports_count} reports, ${reportEvidence.renouncements} renouncements) indicate a blocker here. Fix reconnects ${Math.round(
+            unlockMeters
+          )} m of passable network and unlocks ${summarizeUnlockedDestinations(
+            otherStats.destination_counts
+          )}.${reportSummary ? ` Categories: ${reportSummary}.` : ""}`
+        : `Fix reconnects ${Math.round(unlockMeters)} m of passable network and unlocks ${summarizeUnlockedDestinations(
+            otherStats.destination_counts
+          )}.`
 
     rawCandidates.push({
       blocker_id: `blk-${edge.edge_id}`,
@@ -930,15 +1094,16 @@ export function runAnalysisPipeline(
       unlocked_destination_counts: cloneCounts(otherStats.destination_counts),
       unlocked_component_id: otherComponent,
       confidence: edge.classification.confidence,
-      osm_id: `way/${edge.way_id}`,
+      osm_id: blockerType === "report" ? "N/A" : `way/${edge.way_id}`,
+      reports_count: reportEvidence?.reports_count,
+      renouncements: reportEvidence?.renouncements,
+      report_ids: reportEvidence ? [...reportEvidence.report_ids] : undefined,
       tags: edge.tags,
       inferred_signals: [...edge.classification.inferred_signals],
-      report_signal_count: 0,
+      report_signal_count: reportSignalCount,
       confidence_bonus: confidenceBoost,
       fix_cost_penalty: fixPenalty,
-      reason: `Fix reconnects ${Math.round(unlockMeters)} m of passable network and unlocks ${summarizeUnlockedDestinations(
-        otherStats.destination_counts
-      )}.`,
+      reason,
       grouped_component_key: `${baseComponentId}->${otherComponent}`,
       location_label: edge.location_label,
       lat: edge.mid_coord[1],
@@ -946,24 +1111,9 @@ export function runAnalysisPipeline(
     })
   }
 
-  const reportSignals: ReportSignal[] = (options.reports ?? [])
-    .filter(
-      (report): report is AggregatedReport & { coordinates: Coord } =>
-        report.effective_reports > 0 &&
-        Array.isArray(report.coordinates) &&
-        report.coordinates.length === 2
-    )
-    .map((report) => ({
-      report_id: report.report_id,
-      category: report.category,
-      confidence: report.confidence,
-      effective_reports: report.effective_reports,
-      coordinates: report.coordinates,
-    }))
-
   const reportIndex = new SpatialHash<number>(0.015, 0.015)
   reportSignals.forEach((report, index) => reportIndex.insertPoint(report.coordinates, index))
-  const matchedReportIds = new Set<string>()
+  const matchedReportIds = new Set<string>(reportMatchedByEdgeIds)
 
   const candidatesWithReports = rawCandidates.map((candidate) => {
     const point: Coord = [candidate.lon, candidate.lat]
@@ -1009,8 +1159,16 @@ export function runAnalysisPipeline(
   const syntheticCandidates: CandidateInternal[] = []
   for (const report of reportSignals) {
     if (matchedReportIds.has(report.report_id)) continue
-    if (!HARD_REPORT_CATEGORIES.has(report.category.toLowerCase().trim())) continue
+    if (!reportCategoryIsHard(report.category)) continue
     if (baseComponentId === null) continue
+
+    const syntheticNearestEdge = nearestEdgeIndex(
+      report.coordinates,
+      edges,
+      edgeIndex,
+      MAX_REPORT_SNAP_DISTANCE_M,
+      true
+    )
 
     const snappedReportNode = nearestGraphNode(
       report.coordinates,
@@ -1022,7 +1180,18 @@ export function runAnalysisPipeline(
       snappedReportNode && dsu.find(snappedReportNode.node_id) !== baseComponentId
         ? dsu.find(snappedReportNode.node_id)
         : null
-    if (reportComponent === null) continue
+    if (reportComponent === null || !snappedReportNode) continue
+    const snappedNode = nodeById.get(snappedReportNode.node_id)
+    if (!snappedNode) continue
+    const snappedEdge =
+      syntheticNearestEdge !== null ? edges[syntheticNearestEdge.edge_index] : undefined
+    const snappedCoordinates: Coord = snappedEdge
+      ? snappedEdge.mid_coord
+      : [snappedNode.lon, snappedNode.lat]
+    const blockedMeters = snappedEdge?.length_m ?? 30
+    const locationLabel =
+      snappedEdge?.location_label ??
+      `${snappedCoordinates[1].toFixed(5)}, ${snappedCoordinates[0].toFixed(5)}`
 
     const otherStats = componentStats.get(reportComponent)
     if (!otherStats) continue
@@ -1044,8 +1213,8 @@ export function runAnalysisPipeline(
       name: "Reported accessibility blocker",
       score,
       unlock_m: otherStats.length_m,
-      blocked_m: 30,
-      distance_m: haversineMeters(anchorPoint, report.coordinates),
+      blocked_m: blockedMeters,
+      distance_m: haversineMeters(anchorPoint, snappedCoordinates),
       delta_nas_points: 0,
       delta_oas_points: deltaOas,
       delta_general_points: deltaGeneral,
@@ -1055,7 +1224,10 @@ export function runAnalysisPipeline(
       unlocked_destination_counts: cloneCounts(otherStats.destination_counts),
       unlocked_component_id: reportComponent,
       confidence: report.confidence,
-      osm_id: `report/${report.report_id}`,
+      osm_id: "N/A",
+      reports_count: report.reports_count,
+      renouncements: report.renouncements,
+      report_ids: [report.report_id],
       tags: { report_category: report.category },
       inferred_signals: [`Community report category: ${report.category}.`],
       report_signal_count: report.effective_reports,
@@ -1065,9 +1237,9 @@ export function runAnalysisPipeline(
         otherStats.length_m
       )} m and ${otherStats.poi_count} destinations.`,
       grouped_component_key: `${baseComponentId}->${reportComponent}`,
-      location_label: `${report.coordinates[1].toFixed(5)}, ${report.coordinates[0].toFixed(5)}`,
-      lat: report.coordinates[1],
-      lon: report.coordinates[0],
+      location_label: locationLabel,
+      lat: snappedCoordinates[1],
+      lon: snappedCoordinates[0],
     })
   }
 

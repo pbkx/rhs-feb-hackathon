@@ -1,0 +1,5 @@
+
+> my-project@0.1.0 dev:server
+> tsx watch server/src/index.ts
+
+[server] listening on http://localhost:3001

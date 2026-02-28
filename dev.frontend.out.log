@@ -1,0 +1,11 @@
+
+> my-project@0.1.0 dev:frontend
+> next dev
+
+▲ Next.js 16.1.6 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://10.0.1.90:3000
+
+✓ Starting...
+Creating turbopack project { dir: 'C:\\Users\\maxch\\rhs-feb-hackathon', testMode: true }
+✓ Ready in 455ms

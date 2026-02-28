@@ -2,13 +2,12 @@
 
 import { useAppState, type AppMode } from "@/lib/app-context"
 import { mapManager } from "@/lib/map/manager"
-import { Search, BarChart3, Flag, Info } from "lucide-react"
+import { Search, Flag, Info } from "lucide-react"
 import { useState, useRef, useEffect } from "react"
 import { createPortal } from "react-dom"
 
 const modes: { mode: AppMode; icon: typeof Search; label: string }[] = [
   { mode: "search", icon: Search, label: "Search" },
-  { mode: "analyze", icon: BarChart3, label: "Analyze" },
   { mode: "report", icon: Flag, label: "Report" },
   { mode: "about", icon: Info, label: "About" },
 ]
@@ -79,7 +78,7 @@ export function IconRail({ collapsed, onToggleCollapse }: IconRailProps) {
         barrierId: undefined,
         coordinates: null,
       })
-      setReportLocationMode(true)
+      setReportLocationMode(false)
     }
     setActiveMode(mode)
   }

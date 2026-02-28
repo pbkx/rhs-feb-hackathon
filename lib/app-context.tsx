@@ -3,7 +3,7 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from "react"
 import type { AnalyzeResultPayload, ReportRecord } from "@/lib/api/client"
 
-export type AppMode = "search" | "analyze" | "report" | "about"
+export type AppMode = "search" | "report" | "about"
 type AnalysisStatus = "idle" | "loading" | "done" | "error"
 export type BBox = [number, number, number, number]
 
@@ -48,6 +48,8 @@ export interface MockBarrier {
   unlockedComponentId: number | null
   score: number
   osmId: string
+  reportCount?: number
+  renouncements?: number
   tags: Record<string, string>
   inferredSignals: string[]
   reason?: string
@@ -62,6 +64,7 @@ interface ReportDraft {
   category: string
   description: string
   email: string
+  blockedSteps: string
   coordinates: [number, number] | null
 }
 
@@ -155,6 +158,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     category: "",
     description: "",
     email: "",
+    blockedSteps: "",
     coordinates: null,
   })
   const [reportLocationMode, setReportLocationMode] = useState(false)
@@ -177,7 +181,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setPanelOpen(true)
       const rootViews: Record<AppMode, string> = {
         search: "SearchHome",
-        analyze: "AnalyzeSetup",
         report: "ReportForm",
         about: "AboutInfo",
       }
@@ -215,6 +218,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       category: "",
       description: "",
       email: "",
+      blockedSteps: "",
       coordinates: null,
     })
   }, [])

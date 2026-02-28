@@ -2,12 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
-import { useAppState, type MockLocation } from "@/lib/app-context"
+import { useAppState, type BBox, type MockLocation } from "@/lib/app-context"
 import { getReports, submitReportFeedback, search as searchApi, type ReportRecord } from "@/lib/api/client"
 import { copyTextToClipboard } from "@/lib/clipboard"
 import { mapManager } from "@/lib/map/manager"
 import { reportDisplayId } from "@/lib/report-id"
 import { haversineMeters } from "@/lib/haversine"
+import { formatDistanceMeters } from "@/lib/format-distance"
+import { bboxFromCenterRadiusKm } from "@/lib/geo-radius"
 import { PanelHeader } from "@/components/panel-header"
 import { MetricCard, SelectPill } from "@/components/view-helpers"
 import {
@@ -32,6 +34,33 @@ const reportConfidenceColors: Record<ReportRecord["confidence"], { bg: string; t
   high: { bg: "#34C759", text: "#FFFFFF", rank: 3 },
   medium: { bg: "#FF9F0A", text: "#FFFFFF", rank: 2 },
   low: { bg: "#FF3B30", text: "#FFFFFF", rank: 1 },
+}
+
+function formatScoreDelta(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "0.0"
+  const sign = value > 0 ? "+" : ""
+  return `${sign}${value.toFixed(1)}`
+}
+
+function reportConfidenceReasons(report: ReportRecord): string[] {
+  const effectiveReports = Math.max(0, Number(report.effective_reports) || 0)
+  const reasons = [
+    `Effective reports: ${report.reports_count} reports - ${report.renouncements} renouncements = ${effectiveReports}.`,
+  ]
+  if (report.confidence === "high") {
+    reasons.push("High confidence is assigned when effective reports are at least 3.")
+  } else if (report.confidence === "medium") {
+    reasons.push("Medium confidence is assigned when effective reports are at least 2.")
+  } else {
+    reasons.push("Low confidence is assigned when effective reports are below 2.")
+  }
+  if (report.last_confirmed_at) {
+    reasons.push(`Last confirmation recorded at ${new Date(report.last_confirmed_at).toLocaleString()}.`)
+  }
+  if (report.blocked_steps !== null) {
+    reasons.push(`Reporter-provided blocked steps: ${report.blocked_steps}.`)
+  }
+  return reasons
 }
 
 function toLocation(result: {
@@ -107,22 +136,51 @@ export function SearchHome() {
 
   const filteredLocations = searchResults
 
+  const startAnalyze = (input: {
+    bbox: BBox
+    anchor: [number, number] | null
+    anchorPoiId?: string | null
+  }) => {
+    setBbox(input.bbox)
+    void mapManager.setBBoxDisplayMode("outline")
+    setAnalysisAnchor(input.anchor)
+    setAnalysisAnchorPoiId(input.anchorPoiId ?? null)
+    setAnalysisJobId(null)
+    setAnalysisPayload(null)
+    setAnalysisStatus("loading")
+    setCurrentStep(0)
+    setActiveMode("search")
+    void mapManager.setBBox(input.bbox)
+    void mapManager.flyTo({
+      bbox: input.bbox,
+      padding: 52,
+    })
+    window.setTimeout(() => {
+      resetNav("AnalyzeLoading")
+    }, 0)
+  }
+
   const openResult = (location: MockLocation) => {
     setSelectedLocation(location)
     addRecentSearch(location.name, location.subtitle)
-    void mapManager.flyTo({
-      bbox: location.bbox ?? undefined,
-      center: [location.lng, location.lat],
-      zoom: 12.5,
+    const analysisBbox = location.bbox ?? bboxFromCenterRadiusKm([location.lng, location.lat], 20)
+    startAnalyze({
+      bbox: analysisBbox,
+      anchor: [location.lng, location.lat],
+      anchorPoiId: null,
     })
-    pushView("SearchResults")
   }
 
   const openRecent = async (item: { query: string; subtitle: string }) => {
     setSearchQuery(item.query)
     try {
       const response = await searchApi(item.query)
-      setSearchResults(response.map(toLocation))
+      const mapped = response.map(toLocation)
+      setSearchResults(mapped)
+      if (mapped.length > 0) {
+        openResult(mapped[0])
+        return
+      }
       pushView("SearchResults")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Search failed")
@@ -135,7 +193,7 @@ export function SearchHome() {
       return
     }
 
-    setActiveMode("analyze")
+    setActiveMode("search")
     resetNav("AnalyzeResults")
     setSortBy("impact")
     if (type === "barriers") {
@@ -200,18 +258,11 @@ export function SearchHome() {
       toast.error("Map view is not ready yet")
       return
     }
-    setBbox(bbox)
-    void mapManager.setBBoxDisplayMode("outline")
-    setAnalysisAnchor(null)
-    setAnalysisAnchorPoiId(null)
-    setAnalysisJobId(null)
-    setAnalysisPayload(null)
-    setAnalysisStatus("loading")
-    setCurrentStep(0)
-    setActiveMode("analyze")
-    window.setTimeout(() => {
-      resetNav("AnalyzeLoading")
-    }, 0)
+    startAnalyze({
+      bbox,
+      anchor: null,
+      anchorPoiId: null,
+    })
   }
 
   const handleFindNearby = async (key: string) => {
@@ -241,13 +292,17 @@ export function SearchHome() {
             <Search className="h-[15px] w-[15px] text-[#86868B] flex-shrink-0" strokeWidth={1.8} />
             <input
               type="text"
-              placeholder="Search places to analyze..."
+              placeholder="Search places, then auto-analyze..."
               value={query}
               onChange={(e) => setSearchQuery(e.target.value)}
               onFocus={() => setIsFocused(true)}
               onBlur={() => setIsFocused(false)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && query.trim()) {
+                  if (filteredLocations.length > 0) {
+                    openResult(filteredLocations[0])
+                    return
+                  }
                   addRecentSearch(query.trim(), "Search query")
                   pushView("SearchResults")
                 }
@@ -459,7 +514,7 @@ export function SearchResults() {
                           className="text-[12px] font-normal"
                           style={{ color: distance === null ? "#8E8E93" : "#007AFF" }}
                         >
-                          {distance === null ? "N/A" : `${Math.round(distance)} m`}
+                          {formatDistanceMeters(distance)}
                         </span>
                         <span
                           className="inline-flex h-[18px] items-center rounded-[6px] px-1.5 text-[10px] font-semibold uppercase tracking-wide"
@@ -488,7 +543,7 @@ export function SearchResults() {
                       if (match) {
                         setSelectedBarrier(match)
                         void mapManager.focusBarrier(match.id, [match.lng, match.lat], 13.5)
-                        setActiveMode("analyze")
+                        setActiveMode("search")
                         window.setTimeout(() => {
                           resetNav("AnalyzeResults")
                           pushView("BarrierDetails")
@@ -551,11 +606,13 @@ export function ReportDetails() {
   const {
     selectedReport,
     userLocation,
+    analysisPayload,
     setSelectedReport,
     setNearbyReports,
     setSearchResults,
   } = useAppState()
   const [pendingAction, setPendingAction] = useState<"confirm" | "renounce" | null>(null)
+  const [showProvenance, setShowProvenance] = useState(false)
 
   if (!selectedReport) return null
 
@@ -564,11 +621,31 @@ export function ReportDetails() {
   const lastConfirmed = report.last_confirmed_at
     ? new Date(report.last_confirmed_at).toLocaleString()
     : "Not confirmed yet"
-  const distanceMeters =
-    userLocation && report.coordinates
-      ? haversineMeters(userLocation, report.coordinates)
-      : null
+  const distanceMeters = userLocation && report.coordinates
+    ? haversineMeters(userLocation, report.coordinates)
+    : report.distance_m
   const confidenceChip = reportConfidenceColors[report.confidence]
+  const accessibleUnlockMeters = report.accessible_unlock_m ?? 0
+  const blockedSegmentMeters =
+    report.blocked_segment_m ??
+    (report.blocked_steps !== null ? report.blocked_steps * 0.3 : 0)
+  const deltaGeneral = report.delta_general_points ?? 0
+  const deltaNas = report.delta_nas_points ?? 0
+  const deltaOas = report.delta_oas_points ?? 0
+  const destinationsUnlocked = report.destinations_unlocked ?? 0
+  const confidenceReasons = reportConfidenceReasons(report)
+  const calculationMethod =
+    analysisPayload?.meta.calculation_method ??
+    "General accessibility scoring based on network continuity and reachable opportunities."
+  const coordinatesDisplay = report.coordinates
+    ? `${report.coordinates[1].toFixed(6)}, ${report.coordinates[0].toFixed(6)}`
+    : "N/A"
+  const metricsSource =
+    report.accessible_unlock_m !== null ||
+    report.blocked_segment_m !== null ||
+    report.delta_general_points !== null
+      ? "server-side report metric snapshot"
+      : "default report metric fallback"
 
   const refreshReports = async () => {
     const bbox = mapManager.getCurrentViewBBox() ?? undefined
@@ -612,8 +689,10 @@ export function ReportDetails() {
     try {
       setPendingAction(action)
       await submitReportFeedback(report.report_id, action)
-      await refreshReports()
       toast.success(action === "confirm" ? "Report confirmed" : "Report renounced")
+      void refreshReports().catch((error) => {
+        toast.error(error instanceof Error ? error.message : "Failed to refresh report data")
+      })
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to update report")
     } finally {
@@ -668,17 +747,55 @@ export function ReportDetails() {
           <p className="text-[15px] font-medium text-[#1D1D1F] mb-3">{report.category}</p>
           <p className="text-[12px] font-semibold text-[#86868B] uppercase tracking-[0.06em] mb-2">Description</p>
           <p className="text-[14px] font-normal text-[#1D1D1F]">{report.description}</p>
+          {report.blocked_steps !== null && (
+            <p className="text-[12px] text-[#86868B] mt-2">Blocked steps: {report.blocked_steps}</p>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-2 mt-3 mb-1">
           <MetricCard label="Reports" value={String(report.reports_count)} accent="#34C759" />
           <MetricCard label="Renouncements" value={String(report.renouncements)} accent="#FF3B30" />
           <MetricCard
+            label="Accessible unlock"
+            value={`+${formatDistanceMeters(accessibleUnlockMeters)}`}
+            accent="#34C759"
+          />
+          <MetricCard
+            label="Blocked segment"
+            value={formatDistanceMeters(blockedSegmentMeters)}
+            accent="#FF9F0A"
+          />
+          <MetricCard
             label="Distance"
-            value={distanceMeters === null ? "N/A" : `${Math.round(distanceMeters)} m`}
+            value={formatDistanceMeters(distanceMeters)}
             accent={distanceMeters === null ? "#8E8E93" : "#007AFF"}
           />
+          <MetricCard label="General index Delta" value={formatScoreDelta(deltaGeneral)} accent="#0A84FF" />
+          <MetricCard label="NAS Delta" value={formatScoreDelta(deltaNas)} accent="#5856D6" />
+          <MetricCard label="OAS Delta" value={formatScoreDelta(deltaOas)} accent="#14B8A6" />
+          <MetricCard label="Destinations unlocked" value={String(destinationsUnlocked)} accent="#0A84FF" />
           <MetricCard label="Report ID" value={reportIdNumber} accent="#8E8E93" />
+        </div>
+
+        <div className="rounded-[20px] bg-white/90 p-4 shadow-[0_1px_4px_rgba(0,0,0,0.04)] mt-3">
+          <p className="text-[12px] font-semibold text-[#86868B] uppercase tracking-[0.06em] mb-2">
+            Calculation method
+          </p>
+          <p className="text-[13px] font-normal text-[#1D1D1F]">{calculationMethod}</p>
+        </div>
+
+        <div className="rounded-[20px] bg-white/90 p-4 shadow-[0_1px_4px_rgba(0,0,0,0.04)] mt-3">
+          <p className="text-[12px] font-semibold text-[#86868B] uppercase tracking-[0.06em] mb-2">
+            Why this confidence?
+          </p>
+          <ul className="flex flex-col gap-1.5">
+            {confidenceReasons.map((reason, index) => (
+              <li key={`${report.report_id}-confidence-${index}`} className="flex items-start gap-2 text-[14px] font-normal text-[#1D1D1F]">
+                <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-[#007AFF] flex-shrink-0" />
+                {reason}
+              </li>
+            ))}
+          </ul>
         </div>
 
         <p className="text-[12px] text-[#86868B] mt-2 px-1">
@@ -709,13 +826,57 @@ export function ReportDetails() {
           <Link2 className="h-3.5 w-3.5" strokeWidth={1.5} />
           Copy link
         </button>
+
+        <button
+          onClick={() => setShowProvenance(!showProvenance)}
+          className="mt-2 flex items-center justify-between w-full rounded-[20px] bg-white/90 px-4 py-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)] transition-colors duration-150 hover:bg-white"
+        >
+          <span className="text-[12px] font-semibold text-[#86868B] uppercase tracking-[0.06em]">Data provenance</span>
+          <ChevronDown
+            className={`h-4 w-4 text-[#C7C7CC] transition-transform duration-200 ${
+              showProvenance ? "rotate-180" : ""
+            }`}
+            strokeWidth={2}
+          />
+        </button>
+        {showProvenance && (
+          <div className="popover-enter mt-2 rounded-[20px] bg-white/90 px-4 py-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
+            <p className="text-[12px] text-[#86868B] mb-1 font-medium">Report ID</p>
+            <p className="text-[13px] text-[#1D1D1F] font-mono mb-3">{report.report_id}</p>
+            <p className="text-[12px] text-[#86868B] mb-1 font-medium">Coordinates (snapped)</p>
+            <p className="text-[13px] text-[#1D1D1F] font-mono mb-3">{coordinatesDisplay}</p>
+            <p className="text-[12px] text-[#86868B] mb-1 font-medium">Created</p>
+            <p className="text-[12px] text-[#1D1D1F] mb-3">{new Date(report.created_at).toLocaleString()}</p>
+            <p className="text-[12px] text-[#86868B] mb-1 font-medium">Last updated</p>
+            <p className="text-[12px] text-[#1D1D1F] mb-3">{new Date(report.updated_at).toLocaleString()}</p>
+            <p className="text-[12px] text-[#86868B] mb-1 font-medium">Calculation method</p>
+            <p className="text-[12px] text-[#1D1D1F] mb-3">{calculationMethod}</p>
+            <p className="text-[12px] text-[#86868B] mb-1 font-medium">Metric source</p>
+            <p className="text-[12px] text-[#1D1D1F] mb-3">{metricsSource}</p>
+            <p className="text-[12px] text-[#86868B] mb-1 font-medium">Crowd signal totals</p>
+            <p className="text-[13px] text-[#1D1D1F] font-mono mb-3">
+              reports={report.reports_count}, renouncements={report.renouncements}, effective={report.effective_reports}
+            </p>
+          </div>
+        )}
       </div>
     </div>
   )
 }
 
 function SelectedLocationCTA() {
-  const { selectedLocation, setActiveMode, setBbox } = useAppState()
+  const {
+    selectedLocation,
+    setActiveMode,
+    setBbox,
+    resetNav,
+    setAnalysisAnchor,
+    setAnalysisAnchorPoiId,
+    setAnalysisJobId,
+    setAnalysisPayload,
+    setAnalysisStatus,
+    setCurrentStep,
+  } = useAppState()
 
   if (!selectedLocation) return null
 
@@ -746,7 +907,19 @@ function SelectedLocationCTA() {
               selectedLocation.lat + 0.05,
             ]
             setBbox(bbox)
-            setActiveMode("analyze")
+            void mapManager.setBBoxDisplayMode("outline")
+            setAnalysisAnchor([selectedLocation.lng, selectedLocation.lat])
+            setAnalysisAnchorPoiId(null)
+            setAnalysisJobId(null)
+            setAnalysisPayload(null)
+            setAnalysisStatus("loading")
+            setCurrentStep(0)
+            setActiveMode("search")
+            window.setTimeout(() => {
+              void mapManager.setBBox(bbox)
+              void mapManager.flyTo({ bbox, padding: 52 })
+              resetNav("AnalyzeLoading")
+            }, 0)
           }}
           className="flex-1 h-[38px] rounded-lg bg-[#007AFF] text-[13px] font-semibold text-white hover:bg-[#0066DD] transition-colors duration-150"
         >

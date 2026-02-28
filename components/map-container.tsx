@@ -5,7 +5,7 @@ import { toast } from "sonner"
 import { useAppState, type MockBarrier } from "@/lib/app-context"
 import { candidatesFromAnalyzeResult } from "@/lib/barrier-candidate"
 import { mapManager, type MapType } from "@/lib/map/manager"
-import { getPois, getReports, type ReportRecord } from "@/lib/api/client"
+import { getBootstrap, getPois, getReports, type ReportRecord } from "@/lib/api/client"
 import { bboxFromCenterRadiusKm } from "@/lib/geo-radius"
 
 function normalizeSharedBarrierType(value: unknown): MockBarrier["type"] {
@@ -88,6 +88,14 @@ function parseSharedBarrierPayload(raw: string): MockBarrier | null {
           : null,
       score: Number.isFinite(Number(source.score)) ? Number(source.score) : 0,
       osmId: typeof source.osmId === "string" && source.osmId.trim().length > 0 ? source.osmId : id,
+      reportCount:
+        Number.isFinite(Number(source.reportCount))
+          ? Math.max(0, Math.round(Number(source.reportCount)))
+          : undefined,
+      renouncements:
+        Number.isFinite(Number(source.renouncements))
+          ? Math.max(0, Math.round(Number(source.renouncements)))
+          : undefined,
       tags,
       inferredSignals,
       reason: typeof source.reason === "string" && source.reason.trim().length > 0 ? source.reason : undefined,
@@ -172,6 +180,34 @@ export function MapContainer() {
   }, [])
 
   useEffect(() => {
+    let cancelled = false
+
+    const loadBootstrap = async () => {
+      try {
+        const response = await getBootstrap()
+        if (cancelled) return
+
+        const payload = response.analysis_payload
+        const locationReports = response.reports.filter((report) => !report.barrier_id)
+
+        setCandidates(candidatesFromAnalyzeResult(payload, response.reports))
+        setAnalysisPayload(payload)
+        setNearbyReports(locationReports)
+
+        await mapManager.setAnalysisData(payload)
+        await mapManager.setReportsData(locationReports)
+      } catch (error) {
+        console.warn("[map] bootstrap cache load failed", error)
+      }
+    }
+
+    void loadBootstrap()
+    return () => {
+      cancelled = true
+    }
+  }, [setAnalysisPayload, setCandidates, setNearbyReports])
+
+  useEffect(() => {
     if (typeof window === "undefined") return
     const url = new URL(window.location.href)
     const barrierPayloadRaw = url.searchParams.get("barrier_payload")
@@ -203,6 +239,7 @@ export function MapContainer() {
           last_confirmed_at: url.searchParams.get("last_confirmed_at"),
           category: url.searchParams.get("category") ?? "Report",
           description: url.searchParams.get("description") ?? "Shared report",
+          blocked_steps: null,
           include_coordinates: hasCoords,
           coordinates: hasCoords ? [reportLng, reportLat] : null,
           reports_count: reportsCount,
@@ -215,6 +252,13 @@ export function MapContainer() {
               : url.searchParams.get("confidence") === "medium"
               ? "medium"
               : "low",
+          accessible_unlock_m: null,
+          blocked_segment_m: null,
+          distance_m: null,
+          delta_general_points: null,
+          delta_nas_points: null,
+          delta_oas_points: null,
+          destinations_unlocked: null,
         }
         if (hasCoords) {
           void mapManager.flyTo({ center: [reportLng, reportLat], zoom: 13.5 })
@@ -251,7 +295,7 @@ export function MapContainer() {
     const match = candidateIndex.get(sharedBarrier.id)
     const resolvedBarrier = match ?? sharedBarrier
     setSelectedBarrier(resolvedBarrier)
-    setActiveMode("analyze")
+    setActiveMode("search")
     window.setTimeout(() => {
       resetNav("AnalyzeResults")
       pushView("BarrierDetails")
@@ -298,14 +342,6 @@ export function MapContainer() {
       }, 420)
     })
   }, [])
-
-  useEffect(() => {
-    if (!analysisPayload) {
-      void mapManager.setReportsData([])
-      setNearbyReports([])
-      return
-    }
-  }, [analysisPayload])
 
   useEffect(() => {
     if (!analysisPayload) return
@@ -407,12 +443,31 @@ export function MapContainer() {
   useEffect(() => {
     mapManager.setBarrierClickHandler((barrierId) => {
       const match = candidateIndex.get(barrierId)
+      if (activeMode === "report" && panelOpen) {
+        if (match) {
+          setSelectedBarrier(match)
+        }
+        updateReportDraft({
+          barrierId,
+          coordinates: null,
+        })
+        setReportLocationMode(false)
+        void mapManager.setReportPickMode(false)
+        void mapManager.clearReportMarker()
+        if (currentView !== "ReportForm") {
+          window.setTimeout(() => {
+            resetNav("ReportForm")
+          }, 0)
+        }
+        return
+      }
+
       if (!match) return
 
       setSelectedBarrier(match)
 
-      if (activeMode !== "analyze" || currentView !== "BarrierDetails") {
-        setActiveMode("analyze")
+      if (activeMode !== "search" || currentView !== "BarrierDetails") {
+        setActiveMode("search")
         window.setTimeout(() => {
           resetNav("AnalyzeResults")
           pushView("BarrierDetails")
@@ -423,7 +478,18 @@ export function MapContainer() {
     return () => {
       mapManager.setBarrierClickHandler(null)
     }
-  }, [activeMode, candidateIndex, currentView, pushView, resetNav, setActiveMode, setSelectedBarrier])
+  }, [
+    activeMode,
+    candidateIndex,
+    currentView,
+    panelOpen,
+    pushView,
+    resetNav,
+    setActiveMode,
+    setReportLocationMode,
+    setSelectedBarrier,
+    updateReportDraft,
+  ])
 
   useEffect(() => {
     mapManager.setPoiClickHandler((poi) => {
@@ -437,7 +503,7 @@ export function MapContainer() {
       setSelectedBarrier(null)
       setAnalysisStatus("loading")
       setCurrentStep(0)
-      setActiveMode("analyze")
+      setActiveMode("search")
       void mapManager.setBBoxDisplayMode("outline")
       void mapManager.setBBox(analysisBbox)
       void mapManager.flyTo({ bbox: analysisBbox, padding: 52 })

@@ -62,6 +62,9 @@ export interface AccessBlockerCandidate {
   unlocked_component_id: number | null
   confidence: Confidence
   osm_id: string
+  reports_count?: number
+  renouncements?: number
+  report_ids?: string[]
   tags: Record<string, string>
   inferred_signals: string[]
   report_signal_count: number
@@ -153,6 +156,7 @@ export interface SubmittedReport {
   category?: string
   description?: string
   email?: string
+  blocked_steps?: number | null
   include_coordinates: boolean
   coordinates: [number, number] | null
 }
@@ -167,9 +171,17 @@ export interface AggregatedReport {
   description: string
   include_coordinates: boolean
   coordinates: [number, number] | null
+  blocked_steps: number | null
   reports_count: number
   confirmations: number
   renouncements: number
   effective_reports: number
   confidence: "high" | "medium" | "low"
+  accessible_unlock_m: number | null
+  blocked_segment_m: number | null
+  distance_m: number | null
+  delta_general_points: number | null
+  delta_nas_points: number | null
+  delta_oas_points: number | null
+  destinations_unlocked: number | null
 }

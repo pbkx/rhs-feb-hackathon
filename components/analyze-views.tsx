@@ -8,6 +8,7 @@ import { candidatesFromAnalyzeResult } from "@/lib/barrier-candidate"
 import { copyTextToClipboard } from "@/lib/clipboard"
 import { mapManager } from "@/lib/map/manager"
 import { haversineMeters } from "@/lib/haversine"
+import { formatDistanceMeters } from "@/lib/format-distance"
 import { PanelHeader } from "@/components/panel-header"
 import { MetricCard, SelectPill } from "@/components/view-helpers"
 import {
@@ -42,7 +43,7 @@ const barrierTypeColors: Record<string, string> = {
   wheelchair_no: "#DC2626",
   wheelchair_limited: "#F59E0B",
   access_no: "#DC2626",
-  report: "#06B6D4",
+  report: "#DC2626",
   other: "#6B7280",
 }
 
@@ -57,11 +58,6 @@ const LOADING_STEPS = [
   "Computing accessibility graph...",
   "Ranking blockers and map overlays...",
 ]
-
-function formatMeters(value: number | null | undefined) {
-  if (value === null || value === undefined || !Number.isFinite(value)) return "N/A"
-  return `${Math.max(0, Math.round(value))} m`
-}
 
 function formatScoreDelta(value: number | null | undefined) {
   if (value === null || value === undefined || !Number.isFinite(value)) return "0.0"
@@ -376,7 +372,17 @@ export function AnalyzeResults() {
       <PanelHeader title="Top Access Blockers" />
       <div className="flex-1 overflow-y-auto panel-scroll px-4 pb-6">
         <p className="text-[13px] font-normal text-[#86868B] pt-3 pb-2 px-1">
-          {radius === "viewport" ? "Within current viewport" : `Within ${radius} of your location`}
+          {radius === "viewport"
+            ? "Within current viewport"
+            : `Within ${
+                radius === "500m"
+                  ? "500 m"
+                  : radius === "1000m"
+                  ? "1 km"
+                  : radius === "5000m"
+                  ? "5 km"
+                  : "20 km"
+              } of your location`}
         </p>
 
         <div className="flex items-center gap-2 mb-4">
@@ -386,9 +392,9 @@ export function AnalyzeResults() {
             options={[
               { value: "viewport", label: "Viewport" },
               { value: "500m", label: "500 m" },
-              { value: "1000m", label: "1000 m" },
-              { value: "5000m", label: "5000 m" },
-              { value: "20000m", label: "20000 m" },
+              { value: "1000m", label: "1 km" },
+              { value: "5000m", label: "5 km" },
+              { value: "20000m", label: "20 km" },
             ]}
             icon={<ChevronDown className="h-3 w-3" />}
           />
@@ -494,13 +500,13 @@ export function AnalyzeResults() {
                   </p>
                   <div className="flex items-center gap-2 mt-0.5">
                     <span className="text-[12px] font-semibold text-[#34C759]">
-                      +{Math.max(0, Math.round(barrier.gain))} m unlock
+                      +{formatDistanceMeters(barrier.gain)} unlock
                     </span>
                     <span
                       className="text-[12px] font-normal"
                       style={{ color: userDistance === null ? "#8E8E93" : "#007AFF" }}
                     >
-                      {formatMeters(userDistance)}
+                      {formatDistanceMeters(userDistance)}
                     </span>
                     <span className="text-[12px] font-semibold text-[#0A84FF]">
                       Delta {formatScoreDelta(barrier.deltaGeneral)}
@@ -547,6 +553,16 @@ export function BarrierDetails() {
     b.calculationMethod ??
     analysisPayload?.meta.calculation_method ??
     "General accessibility scoring based on network continuity and reachable opportunities."
+  const osmIdDisplay = b.osmId.startsWith("way/") ? b.osmId.split("/")[1] ?? "N/A" : "N/A"
+  const isReportBarrier = b.type === "report"
+  const reportsDisplay =
+    typeof b.reportCount === "number" && Number.isFinite(b.reportCount)
+      ? String(Math.max(0, Math.round(b.reportCount)))
+      : "N/A"
+  const renouncementsDisplay =
+    typeof b.renouncements === "number" && Number.isFinite(b.renouncements)
+      ? String(Math.max(0, Math.round(b.renouncements)))
+      : "N/A"
 
   const handleCopyLink = async () => {
     try {
@@ -591,40 +607,33 @@ export function BarrierDetails() {
         </div>
 
         <div className="grid grid-cols-2 gap-2 mb-4">
-          <MetricCard label="Accessible unlock" value={`+${Math.max(0, Math.round(b.gain))} m`} accent="#34C759" />
-          <MetricCard label="Blocked segment" value={`${Math.max(0, Math.round(b.upstreamBlocked))} m`} accent="#FF9F0A" />
+          <MetricCard label="Accessible unlock" value={`+${formatDistanceMeters(b.gain)}`} accent="#34C759" />
+          {isReportBarrier ? (
+            <MetricCard label="Reports" value={reportsDisplay} accent="#34C759" />
+          ) : (
+            <MetricCard label="Blocked segment" value={formatDistanceMeters(b.upstreamBlocked)} accent="#FF9F0A" />
+          )}
           <MetricCard
             label="Distance"
-            value={formatMeters(distanceFromUser)}
+            value={formatDistanceMeters(distanceFromUser)}
             accent={distanceFromUser === null ? "#8E8E93" : "#007AFF"}
           />
           <MetricCard label="General index Delta" value={formatScoreDelta(b.deltaGeneral)} accent="#0A84FF" />
           <MetricCard label="NAS Delta" value={formatScoreDelta(b.deltaNas)} accent="#5856D6" />
           <MetricCard label="OAS Delta" value={formatScoreDelta(b.deltaOas)} accent="#14B8A6" />
           <MetricCard label="Destinations unlocked" value={String(b.unlockedPoiCount)} accent="#0A84FF" />
-          <MetricCard label="OSM ID" value={b.osmId.split("/")[1]} accent="#8E8E93" />
+          {isReportBarrier ? (
+            <MetricCard label="Renouncements" value={renouncementsDisplay} accent="#FF3B30" />
+          ) : (
+            <MetricCard label="OSM ID" value={osmIdDisplay} accent="#8E8E93" />
+          )}
         </div>
 
         <div className="rounded-[20px] bg-white/90 p-4 shadow-[0_1px_4px_rgba(0,0,0,0.04)] mb-4">
           <p className="text-[12px] font-semibold text-[#86868B] uppercase tracking-[0.06em] mb-2">
-            Why this blocker matters
+            Calculation method
           </p>
-          <p className="text-[14px] font-normal text-[#1D1D1F] mb-2">
-            {b.reason ?? "Fixing this blocker reconnects a disconnected pedestrian component."}
-          </p>
-          <p className="text-[12px] text-[#86868B]">{`Baseline index ${b.baselineIndex.toFixed(1)} to post-fix index ${b.postFixIndex.toFixed(1)}`}</p>
-          {Object.keys(b.unlockedDestinationCounts).length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-1">
-              {Object.entries(b.unlockedDestinationCounts).map(([kind, count]) => (
-                <span
-                  key={kind}
-                  className="rounded-[8px] bg-[#F2F2F7] px-2 py-0.5 text-[11px] font-medium text-[#1D1D1F]"
-                >
-                  {count} {kind}
-                </span>
-              ))}
-            </div>
-          )}
+          <p className="text-[13px] font-normal text-[#1D1D1F]">{calculationMethod}</p>
         </div>
 
         <div className="rounded-[20px] bg-white/90 p-4 shadow-[0_1px_4px_rgba(0,0,0,0.04)] mb-4">
@@ -683,8 +692,19 @@ export function BarrierDetails() {
         </button>
         {showProvenance && (
           <div className="popover-enter rounded-[20px] bg-white/90 px-4 py-3.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
-            <p className="text-[12px] text-[#86868B] mb-1 font-medium">OSM ID</p>
-            <p className="text-[13px] text-[#1D1D1F] font-mono mb-3">{b.osmId}</p>
+            {isReportBarrier ? (
+              <>
+                <p className="text-[12px] text-[#86868B] mb-1 font-medium">Reports</p>
+                <p className="text-[13px] text-[#1D1D1F] font-mono mb-3">{reportsDisplay}</p>
+                <p className="text-[12px] text-[#86868B] mb-1 font-medium">Renouncements</p>
+                <p className="text-[13px] text-[#1D1D1F] font-mono mb-3">{renouncementsDisplay}</p>
+              </>
+            ) : (
+              <>
+                <p className="text-[12px] text-[#86868B] mb-1 font-medium">OSM ID</p>
+                <p className="text-[13px] text-[#1D1D1F] font-mono mb-3">{b.osmId}</p>
+              </>
+            )}
             <p className="text-[12px] text-[#86868B] mb-1 font-medium">Calculation method</p>
             <p className="text-[12px] text-[#1D1D1F] mb-3">{calculationMethod}</p>
             <p className="text-[12px] text-[#86868B] mb-1 font-medium">Tags</p>

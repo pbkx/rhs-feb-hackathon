@@ -106,6 +106,14 @@ function rankingToCandidate(
         : null,
     score: Number(toFiniteNumber(ranking.score).toFixed(3)),
     osmId: ranking.osm_id,
+    reportCount:
+      typeof ranking.reports_count === "number" && Number.isFinite(ranking.reports_count)
+        ? Math.max(0, Math.round(ranking.reports_count))
+        : undefined,
+    renouncements:
+      typeof ranking.renouncements === "number" && Number.isFinite(ranking.renouncements)
+        ? Math.max(0, Math.round(ranking.renouncements))
+        : undefined,
     tags: ranking.tags,
     inferredSignals: normalizeInferredSignals(ranking.inferred_signals),
     reason: ranking.reason,
@@ -218,6 +226,8 @@ export function candidatesFromAnalyzeResult(
       unlockedComponentId: null,
       score: Number(toFiniteNumber(props.score).toFixed(3)),
       osmId: typeof props.osm_id === "string" ? props.osm_id : barrierId,
+      reportCount: undefined,
+      renouncements: undefined,
       tags: {},
       inferredSignals: [EXPLICIT_OSM_SIGNAL],
       calculationMethod,

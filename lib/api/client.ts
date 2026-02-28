@@ -60,6 +60,9 @@ export interface AccessBlockerCandidate {
   unlocked_component_id: number | null
   confidence: "high" | "medium" | "low"
   osm_id: string
+  reports_count?: number
+  renouncements?: number
+  report_ids?: string[]
   tags: Record<string, string>
   inferred_signals: string[]
   report_signal_count: number
@@ -137,6 +140,7 @@ export interface ReportRecord {
   category: string
   description: string
   email?: string
+  blocked_steps: number | null
   include_coordinates: boolean
   coordinates: [number, number] | null
   reports_count: number
@@ -144,6 +148,18 @@ export interface ReportRecord {
   renouncements: number
   effective_reports: number
   confidence: "high" | "medium" | "low"
+  accessible_unlock_m: number | null
+  blocked_segment_m: number | null
+  distance_m: number | null
+  delta_general_points: number | null
+  delta_nas_points: number | null
+  delta_oas_points: number | null
+  destinations_unlocked: number | null
+}
+
+export interface BootstrapResponse {
+  analysis_payload: AnalyzeResultPayload
+  reports: ReportRecord[]
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -213,6 +229,7 @@ export async function submitReport(payload: {
   category: string
   description: string
   email?: string
+  blocked_steps?: number
   include_coordinates: boolean
   coordinates: [number, number] | null
 }): Promise<{ ok: true; report_id: string }> {
@@ -238,4 +255,8 @@ export async function submitReportFeedback(
       body: JSON.stringify({ action }),
     }
   )
+}
+
+export async function getBootstrap(): Promise<BootstrapResponse> {
+  return request<BootstrapResponse>("/bootstrap")
 }

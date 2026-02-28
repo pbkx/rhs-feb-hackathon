@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto"
+import { readFile, readdir, stat } from "node:fs/promises"
+import path from "node:path"
 import cors from "cors"
 import express from "express"
 import { z } from "zod"
 import { cacheKey, readJsonCache, writeJsonCache } from "./lib/cache"
-import { bboxAreaDegrees, normalizeBBox } from "./lib/geo"
+import { bboxAreaDegrees, haversineMeters, normalizeBBox } from "./lib/geo"
 import { runAnalysisPipeline } from "./services/analysis"
 import { overpassToPoisGeojson } from "./services/pois"
 import {
@@ -12,10 +14,19 @@ import {
   overpassPoisQueryVersion,
   overpassQueryVersion,
 } from "./services/overpass"
-import { appendReport, buildReportGroupId, findReportById, listReports } from "./services/reports"
+import {
+  appendReport,
+  buildReportGroupId,
+  findReportById,
+  findReportByIdBase,
+  listReports,
+} from "./services/reports"
 import { searchNominatim } from "./services/search"
 import type {
+  AccessBlockerCandidate,
+  AggregatedReport,
   AnalysisComputed,
+  AnalysisResultPayload,
   AnalyzeJob,
   BBox,
   JobError,
@@ -24,6 +35,7 @@ import type {
 
 const MAX_ANALYZE_BBOX_AREA_DEGREES = 0.24
 const MAX_POI_BBOX_AREA_DEGREES = 0.45
+const REPORT_METRIC_RADIUS_KM = 2.2
 const jobs = new Map<string, AnalyzeJob>()
 
 const bboxSchema = z
@@ -61,6 +73,7 @@ const reportSchema = z.object({
   category: z.enum(allowedReportCategories),
   description: z.string().min(1),
   email: z.string().email().optional(),
+  blocked_steps: z.number().int().min(0).max(10_000).optional(),
   include_coordinates: z.boolean(),
   coordinates: z.tuple([z.number(), z.number()]).nullable(),
 })
@@ -164,6 +177,368 @@ function parseBboxQuery(value: string | undefined): BBox | null {
   return bbox
 }
 
+interface ReportMetricSnapshot {
+  accessible_unlock_m: number | null
+  blocked_segment_m: number | null
+  distance_m: number | null
+  delta_general_points: number | null
+  delta_nas_points: number | null
+  delta_oas_points: number | null
+  destinations_unlocked: number | null
+}
+
+function bboxFromCenterRadiusKm(center: [number, number], radiusKm: number): BBox {
+  const [lon, lat] = center
+  const latDelta = radiusKm / 110.54
+  const lonDelta = radiusKm / (111.32 * Math.max(0.2, Math.cos((lat * Math.PI) / 180)))
+  return normalizeBBox([lon - lonDelta, lat - latDelta, lon + lonDelta, lat + latDelta] as BBox)
+}
+
+function toNullableNumber(value: unknown, decimals = 2): number | null {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return null
+  return Number(parsed.toFixed(decimals))
+}
+
+function stepCountToMeters(blockedSteps: number | null) {
+  if (blockedSteps === null || blockedSteps < 0) return 0
+  return blockedSteps * 0.3
+}
+
+function defaultReportMetrics(report: AggregatedReport): ReportMetricSnapshot {
+  return {
+    accessible_unlock_m: 0,
+    blocked_segment_m: stepCountToMeters(report.blocked_steps),
+    distance_m: null,
+    delta_general_points: 0,
+    delta_nas_points: 0,
+    delta_oas_points: 0,
+    destinations_unlocked: 0,
+  }
+}
+
+function metricsFromCandidate(
+  candidate: AccessBlockerCandidate,
+  blockedSteps: number | null
+): ReportMetricSnapshot {
+  return {
+    accessible_unlock_m: toNullableNumber(candidate.unlock_m, 0),
+    blocked_segment_m:
+      toNullableNumber(candidate.blocked_m, 0) ??
+      (blockedSteps !== null ? stepCountToMeters(blockedSteps) : 0),
+    distance_m: toNullableNumber(candidate.distance_m, 0),
+    delta_general_points: toNullableNumber(candidate.delta_general_points, 3),
+    delta_nas_points: toNullableNumber(candidate.delta_nas_points, 3),
+    delta_oas_points: toNullableNumber(candidate.delta_oas_points, 3),
+    destinations_unlocked: toNullableNumber(candidate.unlocked_poi_count, 0),
+  }
+}
+
+function pickReportMetricsCandidate(
+  rankings: AccessBlockerCandidate[],
+  report: AggregatedReport
+): AccessBlockerCandidate | null {
+  const reportCandidates = rankings.filter((candidate) => candidate.blocker_type === "report")
+  if (reportCandidates.length === 0) return null
+
+  const direct = reportCandidates.find(
+    (candidate) =>
+      Array.isArray(candidate.report_ids) && candidate.report_ids.includes(report.report_id)
+  )
+  if (direct) return direct
+
+  if (!report.coordinates) return null
+  let best: AccessBlockerCandidate | null = null
+  let bestDistance = Number.POSITIVE_INFINITY
+  for (const candidate of reportCandidates) {
+    const distance = haversineMeters(report.coordinates, [candidate.lon, candidate.lat])
+    if (distance < bestDistance) {
+      bestDistance = distance
+      best = candidate
+    }
+  }
+  if (bestDistance > 120) return null
+  return best
+}
+
+async function computeAndCacheReportMetrics(reportId: string): Promise<void> {
+  try {
+    const report = await findReportById(reportId)
+    if (!report) return
+
+    let metrics = defaultReportMetrics(report)
+    let candidate: AccessBlockerCandidate | null = null
+
+    if (report.coordinates) {
+      const bbox = bboxFromCenterRadiusKm(report.coordinates, REPORT_METRIC_RADIUS_KM)
+      const [overpassRaw, areaReports] = await Promise.all([
+        fetchOverpassRaw(bbox),
+        listReports(bbox),
+      ])
+      const computed = runAnalysisPipeline(overpassRaw, bbox, overpassQueryVersion(), {
+        anchor: report.coordinates,
+        reports: areaReports,
+      })
+      candidate = pickReportMetricsCandidate(computed.payload.rankings, report)
+    } else if (report.barrier_id) {
+      const mergedCache = mergeCachedPayloads(await readCachedResultPayloads())
+      candidate =
+        mergedCache.rankings.find((ranking) => ranking.barrier_id === report.barrier_id) ?? null
+    }
+
+    if (candidate) {
+      metrics = metricsFromCandidate(candidate, report.blocked_steps)
+    }
+
+    await writeJsonCache("report-metrics", reportId, metrics)
+  } catch (error) {
+    console.warn("[reports] metric compute failed", error)
+  }
+}
+
+function resultsCacheDir() {
+  return path.join(process.cwd(), "cache", "results")
+}
+
+function isValidBBox(value: unknown): value is BBox {
+  return (
+    Array.isArray(value) &&
+    value.length === 4 &&
+    value.every((item) => typeof item === "number" && Number.isFinite(item))
+  )
+}
+
+function emptyBootstrapPayload(): AnalysisResultPayload {
+  return {
+    streams_geojson: { type: "FeatureCollection", features: [] },
+    accessible_streams_geojson: { type: "FeatureCollection", features: [] },
+    blocked_segments_geojson: { type: "FeatureCollection", features: [] },
+    barriers_geojson: { type: "FeatureCollection", features: [] },
+    pois_geojson: { type: "FeatureCollection", features: [] },
+    score_grid_geojson: { type: "FeatureCollection", features: [] },
+    rankings: [],
+    meta: {
+      bbox: [-180, -85, 180, 85],
+      warnings: [],
+      calculation_method:
+        "Startup bootstrap from cached analysis results. Run a fresh analysis for up-to-date area scoring.",
+      overpass_query_version: "bootstrap-cache-v1",
+      profile_assumptions: ["Cached barriers and reports merged across prior analysis runs"],
+      accessibility: {
+        network_accessibility_score: 0,
+        opportunity_accessibility_score: 0,
+        general_accessibility_index: 0,
+        metrics: {
+          coverage_ratio: 0,
+          continuity_ratio: 0,
+          quality_ratio: 0,
+          blocker_pressure_ratio: 0,
+        },
+      },
+      counts: {
+        pedestrian_ways: 0,
+        stream_ways: 0,
+        graph_nodes: 0,
+        pass_edges: 0,
+        limited_edges: 0,
+        blocked_edges: 0,
+        blockers: 0,
+        barriers: 0,
+        components: 0,
+        snapped_pois: 0,
+        unsnapped_pois: 0,
+        reports_used: 0,
+      },
+      debug: {
+        source: "bootstrap",
+      },
+    },
+  }
+}
+
+function normalizeCachedPayload(raw: unknown): AnalysisResultPayload | null {
+  if (!raw || typeof raw !== "object") return null
+  const asObject = raw as { payload?: unknown } & Record<string, unknown>
+  const candidate = asObject.payload ?? asObject
+  if (!candidate || typeof candidate !== "object") return null
+  const payload = candidate as Partial<AnalysisResultPayload>
+  if (!Array.isArray(payload.rankings)) return null
+  if (!payload.barriers_geojson || !Array.isArray(payload.barriers_geojson.features)) return null
+  return payload as AnalysisResultPayload
+}
+
+async function readCachedResultPayloads(limit = 80): Promise<AnalysisResultPayload[]> {
+  try {
+    const entries = await readdir(resultsCacheDir(), { withFileTypes: true })
+    const jsonNames = entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map((entry) => entry.name)
+    if (jsonNames.length === 0) return []
+
+    const withStats = await Promise.all(
+      jsonNames.map(async (name) => {
+        const fullPath = path.join(resultsCacheDir(), name)
+        const info = await stat(fullPath)
+        return { name, fullPath, mtime: info.mtimeMs }
+      })
+    )
+
+    withStats.sort((left, right) => right.mtime - left.mtime)
+    const selected = withStats.slice(0, limit)
+
+    const payloads: AnalysisResultPayload[] = []
+    for (const file of selected) {
+      try {
+        const raw = JSON.parse(await readFile(file.fullPath, "utf8")) as unknown
+        const normalized = normalizeCachedPayload(raw)
+        if (normalized) payloads.push(normalized)
+      } catch {
+        // Ignore invalid cache file entries.
+      }
+    }
+    return payloads
+  } catch {
+    return []
+  }
+}
+
+function mergeBBox(current: BBox | null, next: unknown): BBox | null {
+  if (!isValidBBox(next)) return current
+  if (!current) return [...next] as BBox
+  return [
+    Math.min(current[0], next[0]),
+    Math.min(current[1], next[1]),
+    Math.max(current[2], next[2]),
+    Math.max(current[3], next[3]),
+  ]
+}
+
+function mergeCachedPayloads(payloads: AnalysisResultPayload[]): AnalysisResultPayload {
+  if (payloads.length === 0) return emptyBootstrapPayload()
+
+  const fallbackMeta = emptyBootstrapPayload().meta
+  const rankingByBarrier = new Map<string, AccessBlockerCandidate>()
+  const blockedByEdge = new Map<string, AnalysisResultPayload["blocked_segments_geojson"]["features"][number]>()
+  const warnings = new Set<string>(fallbackMeta.warnings)
+  const profileAssumptions = new Set<string>(fallbackMeta.profile_assumptions)
+  const latestMetaWithCalculation = payloads.find(
+    (payload) =>
+      typeof payload.meta?.calculation_method === "string" &&
+      payload.meta.calculation_method.trim().length > 0
+  )?.meta
+  const calculationMethod =
+    latestMetaWithCalculation?.calculation_method ?? fallbackMeta.calculation_method
+  const overpassQueryVersion =
+    latestMetaWithCalculation?.overpass_query_version ?? fallbackMeta.overpass_query_version
+  let mergedBBox: BBox | null = null
+
+  for (const payload of payloads) {
+    mergedBBox = mergeBBox(mergedBBox, payload.meta?.bbox)
+    for (const warning of payload.meta?.warnings ?? []) {
+      if (typeof warning === "string" && warning.trim().length > 0) {
+        warnings.add(warning)
+      }
+    }
+    for (const assumption of payload.meta?.profile_assumptions ?? []) {
+      if (typeof assumption === "string" && assumption.trim().length > 0) {
+        profileAssumptions.add(assumption)
+      }
+    }
+
+    for (const ranking of payload.rankings ?? []) {
+      if (!ranking?.barrier_id) continue
+      if (!Number.isFinite(ranking.lon) || !Number.isFinite(ranking.lat)) continue
+      const existing = rankingByBarrier.get(ranking.barrier_id)
+      if (!existing || ranking.score > existing.score) {
+        rankingByBarrier.set(ranking.barrier_id, ranking)
+      }
+    }
+
+    for (const feature of payload.blocked_segments_geojson?.features ?? []) {
+      if (feature.geometry?.type !== "LineString") continue
+      const props = (feature.properties ?? {}) as Record<string, unknown>
+      const edgeId = typeof props.edge_id === "string" ? props.edge_id : null
+      if (!edgeId || blockedByEdge.has(edgeId)) continue
+      blockedByEdge.set(edgeId, feature)
+    }
+  }
+
+  const rankings = [...rankingByBarrier.values()]
+    .sort((left, right) => right.score - left.score || right.unlock_m - left.unlock_m)
+    .slice(0, 3200)
+
+  const barriers_geojson: AnalysisResultPayload["barriers_geojson"] = {
+    type: "FeatureCollection",
+    features: rankings.map((candidate) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [candidate.lon, candidate.lat] },
+      properties: {
+        barrier_id: candidate.barrier_id,
+        blocker_id: candidate.blocker_id,
+        type: candidate.blocker_type,
+        name: candidate.name,
+        unlock_m: candidate.unlock_m,
+        blocked_m: candidate.blocked_m,
+        delta_nas_points: candidate.delta_nas_points,
+        delta_oas_points: candidate.delta_oas_points,
+        delta_general_points: candidate.delta_general_points,
+        baseline_general_index: candidate.baseline_general_index,
+        post_fix_general_index: candidate.post_fix_general_index,
+        unlocked_component_id: candidate.unlocked_component_id,
+        grouped_component_key: candidate.grouped_component_key,
+        score: candidate.score,
+        confidence: candidate.confidence,
+        report_signal_count: candidate.report_signal_count,
+      },
+    })),
+  }
+
+  const blocked_segments_geojson: AnalysisResultPayload["blocked_segments_geojson"] = {
+    type: "FeatureCollection",
+    features: [...blockedByEdge.values()],
+  }
+
+  return {
+    streams_geojson: { type: "FeatureCollection", features: [] },
+    accessible_streams_geojson: { type: "FeatureCollection", features: [] },
+    blocked_segments_geojson,
+    barriers_geojson,
+    pois_geojson: { type: "FeatureCollection", features: [] },
+    score_grid_geojson: { type: "FeatureCollection", features: [] },
+    rankings,
+    meta: {
+      ...fallbackMeta,
+      bbox: mergedBBox ?? [-180, -85, 180, 85],
+      warnings: [...warnings],
+      calculation_method: calculationMethod,
+      overpass_query_version: overpassQueryVersion,
+      profile_assumptions: [...profileAssumptions],
+      counts: {
+        ...fallbackMeta.counts,
+        blockers: rankings.length,
+        barriers: rankings.length,
+        blocked_edges: blocked_segments_geojson.features.length,
+      },
+      debug: {
+        source: "bootstrap",
+        cached_payloads: payloads.length,
+        calculation_method_source: latestMetaWithCalculation ? "cached-result" : "fallback",
+      },
+    },
+  }
+}
+
+async function loadBootstrapData(): Promise<{
+  analysis_payload: AnalysisResultPayload
+  reports: AggregatedReport[]
+}> {
+  const [payloads, reports] = await Promise.all([readCachedResultPayloads(), listReports(null)])
+  return {
+    analysis_payload: mergeCachedPayloads(payloads),
+    reports,
+  }
+}
+
 export function createApp() {
   const app = express()
 
@@ -177,6 +552,18 @@ export function createApp() {
 
   app.get("/health", (_req, res) => {
     res.json({ ok: true })
+  })
+
+  app.get("/bootstrap", async (_req, res) => {
+    try {
+      const bootstrap = await loadBootstrapData()
+      return res.json(bootstrap)
+    } catch (error) {
+      console.error("[bootstrap] error", error)
+      return res
+        .status(500)
+        .json({ error: { message: "Failed to load bootstrap cache", code: "BOOTSTRAP_FAILED" } })
+    }
   })
 
   app.get("/pois", async (req, res) => {
@@ -299,10 +686,12 @@ export function createApp() {
         category: payload.category,
         description: payload.description,
         email: payload.email,
+        blocked_steps: payload.blocked_steps ?? null,
         include_coordinates: payload.include_coordinates,
         coordinates: payload.include_coordinates ? payload.coordinates : null,
       }
       await appendReport(report)
+      await computeAndCacheReportMetrics(report.report_id)
       return res.json({ ok: true, report_id: report.report_id })
     } catch (error) {
       console.error("[reports] append error", error)
@@ -319,7 +708,7 @@ export function createApp() {
     }
 
     try {
-      const existing = await findReportById(req.params.report_id)
+      const existing = await findReportByIdBase(req.params.report_id)
       if (!existing) {
         return res.status(404).json({ error: { message: "Report not found", code: "REPORT_NOT_FOUND" } })
       }
@@ -332,11 +721,13 @@ export function createApp() {
         barrier_id: existing.barrier_id,
         category: existing.category,
         description: existing.description,
+        blocked_steps: existing.blocked_steps,
         include_coordinates: Boolean(existing.coordinates),
         coordinates: existing.coordinates,
       }
 
       await appendReport(feedback)
+      void computeAndCacheReportMetrics(existing.report_id)
       return res.json({ ok: true, report_id: existing.report_id, action: parsed.data.action })
     } catch (error) {
       console.error("[reports] feedback error", error)

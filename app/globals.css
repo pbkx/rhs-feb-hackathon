@@ -259,8 +259,8 @@
 }
 
 .barrier-pin--report {
-  --pin-color: #06b6d4;
-  --pin-rgb: 6, 182, 212;
+  --pin-color: #dc2626;
+  --pin-rgb: 220, 38, 38;
 }
 
 .barrier-pin--other {

@@ -2,8 +2,7 @@
 
 import { useEffect, useState } from "react"
 import { useAppState } from "@/lib/app-context"
-import { getReports, submitReport } from "@/lib/api/client"
-import { applyReportConfidenceSignals } from "@/lib/barrier-candidate"
+import { submitReport } from "@/lib/api/client"
 import { PanelHeader } from "@/components/panel-header"
 import { mapManager } from "@/lib/map/manager"
 import { MapPin, CheckCircle2, ChevronDown } from "lucide-react"
@@ -31,10 +30,6 @@ export function ReportForm() {
     setReportLocationMode,
     pushView,
     resetReportDraft,
-    candidates,
-    setCandidates,
-    setSelectedBarrier,
-    setNearbyReports,
   } = useAppState()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const isBarrierReport = Boolean(reportDraft.barrierId)
@@ -64,32 +59,20 @@ export function ReportForm() {
     try {
       setIsSubmitting(true)
       const includeCoordinates = !isBarrierReport
+      const blockedStepsRaw = reportDraft.blockedSteps.trim()
+      const blockedSteps =
+        blockedStepsRaw.length > 0 && Number.isFinite(Number(blockedStepsRaw))
+          ? Math.max(0, Math.round(Number(blockedStepsRaw)))
+          : undefined
       await submitReport({
         barrier_id: reportDraft.barrierId,
         category: reportDraft.category,
         description: reportDraft.description.trim(),
         email: reportDraft.email.trim() || undefined,
+        blocked_steps: blockedSteps,
         include_coordinates: includeCoordinates,
         coordinates: includeCoordinates ? reportDraft.coordinates : null,
       })
-
-      if (isBarrierReport && reportDraft.barrierId) {
-        try {
-          const reportsResponse = await getReports()
-          const allReports = reportsResponse.reports
-          setNearbyReports(allReports.filter((report) => !report.barrier_id))
-          const updatedCandidates = applyReportConfidenceSignals(candidates, allReports)
-          setCandidates(updatedCandidates)
-          const updatedSelected = updatedCandidates.find(
-            (candidate) => candidate.id === reportDraft.barrierId
-          )
-          if (updatedSelected) {
-            setSelectedBarrier(updatedSelected)
-          }
-        } catch (refreshError) {
-          console.warn("[report] failed to refresh barrier confidence", refreshError)
-        }
-      }
 
       toast.success("Report submitted successfully")
       setReportLocationMode(false)
@@ -182,6 +165,21 @@ export function ReportForm() {
               placeholder="Describe the issue..."
               rows={4}
               className="w-full rounded-[16px] bg-white/90 px-4 py-3 text-[15px] font-normal text-[#1D1D1F] placeholder:text-[#C7C7CC] shadow-[0_1px_4px_rgba(0,0,0,0.04)] outline-none focus:shadow-[0_0_0_2px_#007AFF] transition-shadow resize-none"
+            />
+          </div>
+
+          <div>
+            <label className="text-[13px] font-semibold text-[#86868B] uppercase tracking-[0.06em] mb-2.5 block px-1">
+              Blocked Steps (optional)
+            </label>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={reportDraft.blockedSteps}
+              onChange={(e) => updateReportDraft({ blockedSteps: e.target.value })}
+              placeholder="e.g. 5"
+              className="w-full h-[44px] rounded-[16px] bg-white/90 px-4 text-[15px] font-normal text-[#1D1D1F] placeholder:text-[#C7C7CC] shadow-[0_1px_4px_rgba(0,0,0,0.04)] outline-none focus:shadow-[0_0_0_2px_#007AFF] transition-shadow"
             />
           </div>
 
