@@ -31,6 +31,7 @@ interface CachedReportMetrics {
   delta_nas_points: number | null
   delta_oas_points: number | null
   destinations_unlocked: number | null
+  calculation_method: string | null
 }
 
 function normalizedCategory(value: string | undefined): string {
@@ -356,6 +357,7 @@ function aggregateReports(rows: SubmittedReport[]): AggregatedReport[] {
         delta_nas_points: null,
         delta_oas_points: null,
         destinations_unlocked: null,
+        calculation_method: null,
       }
     })
     .sort((a, b) => (a.updated_at > b.updated_at ? -1 : a.updated_at < b.updated_at ? 1 : 0))
@@ -411,6 +413,7 @@ async function enrichReportsWithMetrics(reports: AggregatedReport[]): Promise<Ag
         delta_nas_points: metrics.delta_nas_points,
         delta_oas_points: metrics.delta_oas_points,
         destinations_unlocked: metrics.destinations_unlocked,
+        calculation_method: metrics.calculation_method,
       }
     })
   )

@@ -2,10 +2,10 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
-import { useAppState, type MockBarrier } from "@/lib/app-context"
+import { useAppState, type MockBarrier, type MockLocation } from "@/lib/app-context"
 import { candidatesFromAnalyzeResult } from "@/lib/barrier-candidate"
 import { mapManager, type MapType } from "@/lib/map/manager"
-import { getBootstrap, getPois, getReports, type ReportRecord } from "@/lib/api/client"
+import { getBootstrap, getPois, getReports, getShare, type ReportRecord } from "@/lib/api/client"
 import { bboxFromCenterRadiusKm } from "@/lib/geo-radius"
 
 function normalizeSharedBarrierType(value: unknown): MockBarrier["type"] {
@@ -23,93 +23,97 @@ function normalizeSharedBarrierType(value: unknown): MockBarrier["type"] {
   return "other"
 }
 
+function parseSharedBarrierObject(raw: unknown): MockBarrier | null {
+  if (!raw || typeof raw !== "object") return null
+  const parsed = raw as unknown
+  const parsedObject = parsed as { barrier?: Record<string, unknown> } & Record<string, unknown>
+  const source = ("barrier" in parsedObject ? parsedObject.barrier : parsedObject) as
+    | Record<string, unknown>
+    | undefined
+  if (!source) return null
+
+  const id = typeof source.id === "string" ? source.id.trim() : ""
+  if (!id) return null
+
+  const lat = Number(source.lat)
+  const lng = Number(source.lng)
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+
+  const type = normalizeSharedBarrierType(source.type)
+  const confidence =
+    source.confidence === "high" || source.confidence === "medium" || source.confidence === "low"
+      ? source.confidence
+      : "medium"
+
+  const tags = Object.fromEntries(
+    Object.entries((source.tags as Record<string, unknown>) ?? {}).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string"
+    )
+  )
+
+  const inferredSignals = Array.isArray(source.inferredSignals)
+    ? source.inferredSignals.filter((value): value is string => typeof value === "string")
+    : ["Explicitly tagged in OpenStreetMap."]
+
+  return {
+    id,
+    name: typeof source.name === "string" && source.name.trim().length > 0 ? source.name : "Shared barrier",
+    type,
+    gain: Number.isFinite(Number(source.gain)) ? Number(source.gain) : 0,
+    upstreamBlocked: Number.isFinite(Number(source.upstreamBlocked)) ? Number(source.upstreamBlocked) : 0,
+    confidence,
+    distance: Number.isFinite(Number(source.distance)) ? Number(source.distance) : 0,
+    deltaNas: Number.isFinite(Number(source.deltaNas)) ? Number(source.deltaNas) : 0,
+    deltaOas: Number.isFinite(Number(source.deltaOas)) ? Number(source.deltaOas) : 0,
+    deltaGeneral: Number.isFinite(Number(source.deltaGeneral)) ? Number(source.deltaGeneral) : 0,
+    baselineIndex: Number.isFinite(Number(source.baselineIndex)) ? Number(source.baselineIndex) : 0,
+    postFixIndex: Number.isFinite(Number(source.postFixIndex)) ? Number(source.postFixIndex) : 0,
+    unlockedPoiCount: Number.isFinite(Number(source.unlockedPoiCount))
+      ? Number(source.unlockedPoiCount)
+      : 0,
+    unlockedDestinationCounts:
+      source.unlockedDestinationCounts &&
+      typeof source.unlockedDestinationCounts === "object" &&
+      !Array.isArray(source.unlockedDestinationCounts)
+        ? Object.fromEntries(
+            Object.entries(source.unlockedDestinationCounts as Record<string, unknown>).filter(
+              (entry): entry is [string, number] => typeof entry[1] === "number"
+            )
+          )
+        : {},
+    unlockedComponentId:
+      typeof source.unlockedComponentId === "number" && Number.isFinite(source.unlockedComponentId)
+        ? source.unlockedComponentId
+        : null,
+    score: Number.isFinite(Number(source.score)) ? Number(source.score) : 0,
+    osmId: typeof source.osmId === "string" && source.osmId.trim().length > 0 ? source.osmId : id,
+    reportCount:
+      Number.isFinite(Number(source.reportCount))
+        ? Math.max(0, Math.round(Number(source.reportCount)))
+        : undefined,
+    renouncements:
+      Number.isFinite(Number(source.renouncements))
+        ? Math.max(0, Math.round(Number(source.renouncements)))
+        : undefined,
+    tags,
+    inferredSignals,
+    reason: typeof source.reason === "string" && source.reason.trim().length > 0 ? source.reason : undefined,
+    locationLabel:
+      typeof source.locationLabel === "string" && source.locationLabel.trim().length > 0
+        ? source.locationLabel
+        : undefined,
+    calculationMethod:
+      typeof source.calculationMethod === "string" && source.calculationMethod.trim().length > 0
+        ? source.calculationMethod
+        : undefined,
+    lat,
+    lng,
+  }
+}
+
 function parseSharedBarrierPayload(raw: string): MockBarrier | null {
   try {
-    const parsed = JSON.parse(raw) as unknown
-    if (!parsed || typeof parsed !== "object") return null
-    const parsedObject = parsed as { barrier?: Record<string, unknown> } & Record<string, unknown>
-    const source = ("barrier" in parsedObject ? parsedObject.barrier : parsedObject) as
-      | Record<string, unknown>
-      | undefined
-    if (!source) return null
-
-    const id = typeof source.id === "string" ? source.id.trim() : ""
-    if (!id) return null
-
-    const lat = Number(source.lat)
-    const lng = Number(source.lng)
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
-
-    const type = normalizeSharedBarrierType(source.type)
-    const confidence =
-      source.confidence === "high" || source.confidence === "medium" || source.confidence === "low"
-        ? source.confidence
-        : "medium"
-
-    const tags = Object.fromEntries(
-      Object.entries((source.tags as Record<string, unknown>) ?? {}).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string"
-      )
-    )
-
-    const inferredSignals = Array.isArray(source.inferredSignals)
-      ? source.inferredSignals.filter((value): value is string => typeof value === "string")
-      : ["Explicitly tagged in OpenStreetMap."]
-
-    return {
-      id,
-      name: typeof source.name === "string" && source.name.trim().length > 0 ? source.name : "Shared barrier",
-      type,
-      gain: Number.isFinite(Number(source.gain)) ? Number(source.gain) : 0,
-      upstreamBlocked: Number.isFinite(Number(source.upstreamBlocked)) ? Number(source.upstreamBlocked) : 0,
-      confidence,
-      distance: Number.isFinite(Number(source.distance)) ? Number(source.distance) : 0,
-      deltaNas: Number.isFinite(Number(source.deltaNas)) ? Number(source.deltaNas) : 0,
-      deltaOas: Number.isFinite(Number(source.deltaOas)) ? Number(source.deltaOas) : 0,
-      deltaGeneral: Number.isFinite(Number(source.deltaGeneral)) ? Number(source.deltaGeneral) : 0,
-      baselineIndex: Number.isFinite(Number(source.baselineIndex)) ? Number(source.baselineIndex) : 0,
-      postFixIndex: Number.isFinite(Number(source.postFixIndex)) ? Number(source.postFixIndex) : 0,
-      unlockedPoiCount: Number.isFinite(Number(source.unlockedPoiCount))
-        ? Number(source.unlockedPoiCount)
-        : 0,
-      unlockedDestinationCounts:
-        source.unlockedDestinationCounts &&
-        typeof source.unlockedDestinationCounts === "object" &&
-        !Array.isArray(source.unlockedDestinationCounts)
-          ? Object.fromEntries(
-              Object.entries(source.unlockedDestinationCounts as Record<string, unknown>).filter(
-                (entry): entry is [string, number] => typeof entry[1] === "number"
-              )
-            )
-          : {},
-      unlockedComponentId:
-        typeof source.unlockedComponentId === "number" && Number.isFinite(source.unlockedComponentId)
-          ? source.unlockedComponentId
-          : null,
-      score: Number.isFinite(Number(source.score)) ? Number(source.score) : 0,
-      osmId: typeof source.osmId === "string" && source.osmId.trim().length > 0 ? source.osmId : id,
-      reportCount:
-        Number.isFinite(Number(source.reportCount))
-          ? Math.max(0, Math.round(Number(source.reportCount)))
-          : undefined,
-      renouncements:
-        Number.isFinite(Number(source.renouncements))
-          ? Math.max(0, Math.round(Number(source.renouncements)))
-          : undefined,
-      tags,
-      inferredSignals,
-      reason: typeof source.reason === "string" && source.reason.trim().length > 0 ? source.reason : undefined,
-      locationLabel:
-        typeof source.locationLabel === "string" && source.locationLabel.trim().length > 0
-          ? source.locationLabel
-          : undefined,
-      calculationMethod:
-        typeof source.calculationMethod === "string" && source.calculationMethod.trim().length > 0
-          ? source.calculationMethod
-          : undefined,
-      lat,
-      lng,
-    }
+    return parseSharedBarrierObject(JSON.parse(raw) as unknown)
   } catch {
     return null
   }
@@ -117,6 +121,29 @@ function parseSharedBarrierPayload(raw: string): MockBarrier | null {
 
 function bboxAreaDegrees(bbox: [number, number, number, number]) {
   return Math.abs(bbox[2] - bbox[0]) * Math.abs(bbox[3] - bbox[1])
+}
+
+function reportsToSearchLocations(reports: ReportRecord[]): MockLocation[] {
+  return reports
+    .filter(
+      (report): report is (ReportRecord & { coordinates: [number, number] }) =>
+        Array.isArray(report.coordinates) && report.coordinates.length === 2
+    )
+    .map((report) => {
+      const description = report.description.length > 60
+        ? `${report.description.slice(0, 57)}...`
+        : report.description
+      return {
+        id: report.report_id,
+        name: report.category || "Report",
+        subtitle: `${description || "User-submitted report"} - ${report.confidence.toUpperCase()} confidence`,
+        lat: report.coordinates[1],
+        lng: report.coordinates[0],
+        bbox: null,
+        type: "report",
+        displayName: report.category || "Report",
+      }
+    })
 }
 
 export function MapContainer() {
@@ -143,6 +170,7 @@ export function MapContainer() {
     updateReportDraft,
     setSelectedBarrier,
     setSelectedReport,
+    setSearchResults,
     setNearbyReports,
     setActiveMode,
     setUserLocation,
@@ -209,84 +237,128 @@ export function MapContainer() {
 
   useEffect(() => {
     if (typeof window === "undefined") return
-    const url = new URL(window.location.href)
-    const barrierPayloadRaw = url.searchParams.get("barrier_payload")
-    const barrierFromPayload = barrierPayloadRaw ? parseSharedBarrierPayload(barrierPayloadRaw) : null
-    if (barrierFromPayload) {
-      void mapManager.setSharedBarrierPreview({
-        id: barrierFromPayload.id,
-        coordinates: [barrierFromPayload.lng, barrierFromPayload.lat],
-        type: barrierFromPayload.type,
-        name: barrierFromPayload.name,
-      })
-      void mapManager.flyTo({ center: [barrierFromPayload.lng, barrierFromPayload.lat], zoom: 13.5 })
-      setSharedBarrier(barrierFromPayload)
-    } else {
-      void mapManager.setSharedBarrierPreview(null)
-      const reportId = url.searchParams.get("report")
-      if (reportId) {
-        const reportLatRaw = url.searchParams.get("r_lat")
-        const reportLngRaw = url.searchParams.get("r_lng")
-        const reportLat = Number(reportLatRaw)
-        const reportLng = Number(reportLngRaw)
-        const hasCoords = Number.isFinite(reportLat) && Number.isFinite(reportLng)
-        const reportsCount = Number(url.searchParams.get("reports") ?? "1") || 1
-        const renouncements = Number(url.searchParams.get("renouncements") ?? "0") || 0
-        const linkedReport: ReportRecord = {
-          report_id: reportId,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-          last_confirmed_at: url.searchParams.get("last_confirmed_at"),
-          category: url.searchParams.get("category") ?? "Report",
-          description: url.searchParams.get("description") ?? "Shared report",
-          blocked_steps: null,
-          include_coordinates: hasCoords,
-          coordinates: hasCoords ? [reportLng, reportLat] : null,
-          reports_count: reportsCount,
-          confirmations: 0,
-          renouncements,
-          effective_reports: reportsCount - renouncements,
-          confidence:
-            url.searchParams.get("confidence") === "high"
-              ? "high"
-              : url.searchParams.get("confidence") === "medium"
-              ? "medium"
-              : "low",
-          accessible_unlock_m: null,
-          blocked_segment_m: null,
-          distance_m: null,
-          delta_general_points: null,
-          delta_nas_points: null,
-          delta_oas_points: null,
-          destinations_unlocked: null,
+    let cancelled = false
+
+    const loadSharedFromUrl = async () => {
+      const url = new URL(window.location.href)
+      const shareCacheId = url.searchParams.get("share")
+
+      if (shareCacheId) {
+        try {
+          const shared = await getShare(shareCacheId)
+          if (cancelled) return
+          if (shared.kind === "barrier") {
+            const barrierFromCache = parseSharedBarrierObject(shared.barrier)
+            if (barrierFromCache) {
+              void mapManager.setSharedBarrierPreview({
+                id: barrierFromCache.id,
+                coordinates: [barrierFromCache.lng, barrierFromCache.lat],
+                type: barrierFromCache.type,
+                name: barrierFromCache.name,
+              })
+              void mapManager.flyTo({ center: [barrierFromCache.lng, barrierFromCache.lat], zoom: 13.5 })
+              setSharedBarrier(barrierFromCache)
+            }
+          } else {
+            const sharedReportRecord = shared.report
+            if (sharedReportRecord.coordinates) {
+              void mapManager.flyTo({ center: sharedReportRecord.coordinates, zoom: 13.5 })
+            }
+            setSharedReport(sharedReportRecord)
+          }
+        } catch (error) {
+          if (!cancelled) {
+            console.warn("[map] failed to load shared cache payload", error)
+            toast.error("Shared link not found")
+          }
         }
-        if (hasCoords) {
-          void mapManager.flyTo({ center: [reportLng, reportLat], zoom: 13.5 })
+      } else {
+        const barrierPayloadRaw = url.searchParams.get("barrier_payload")
+        const barrierFromPayload = barrierPayloadRaw ? parseSharedBarrierPayload(barrierPayloadRaw) : null
+        if (barrierFromPayload) {
+          void mapManager.setSharedBarrierPreview({
+            id: barrierFromPayload.id,
+            coordinates: [barrierFromPayload.lng, barrierFromPayload.lat],
+            type: barrierFromPayload.type,
+            name: barrierFromPayload.name,
+          })
+          void mapManager.flyTo({ center: [barrierFromPayload.lng, barrierFromPayload.lat], zoom: 13.5 })
+          setSharedBarrier(barrierFromPayload)
+        } else {
+          void mapManager.setSharedBarrierPreview(null)
+          const reportId = url.searchParams.get("report")
+          if (reportId) {
+            const reportLatRaw = url.searchParams.get("r_lat")
+            const reportLngRaw = url.searchParams.get("r_lng")
+            const reportLat = Number(reportLatRaw)
+            const reportLng = Number(reportLngRaw)
+            const hasCoords = Number.isFinite(reportLat) && Number.isFinite(reportLng)
+            const reportsCount = Number(url.searchParams.get("reports") ?? "1") || 1
+            const renouncements = Number(url.searchParams.get("renouncements") ?? "0") || 0
+            const linkedReport: ReportRecord = {
+              report_id: reportId,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              last_confirmed_at: url.searchParams.get("last_confirmed_at"),
+              category: url.searchParams.get("category") ?? "Report",
+              description: url.searchParams.get("description") ?? "Shared report",
+              blocked_steps: null,
+              include_coordinates: hasCoords,
+              coordinates: hasCoords ? [reportLng, reportLat] : null,
+              reports_count: reportsCount,
+              confirmations: 0,
+              renouncements,
+              effective_reports: reportsCount - renouncements,
+              confidence:
+                url.searchParams.get("confidence") === "high"
+                  ? "high"
+                  : url.searchParams.get("confidence") === "medium"
+                  ? "medium"
+                  : "low",
+              accessible_unlock_m: null,
+              blocked_segment_m: null,
+              distance_m: null,
+              delta_general_points: null,
+              delta_nas_points: null,
+              delta_oas_points: null,
+              destinations_unlocked: null,
+              calculation_method: null,
+            }
+            if (hasCoords) {
+              void mapManager.flyTo({ center: [reportLng, reportLat], zoom: 13.5 })
+            }
+            setSharedReport(linkedReport)
+          }
         }
-        setSharedReport(linkedReport)
+      }
+
+      const paramsToClear = [
+        "share",
+        "barrier_payload",
+        "report",
+        "category",
+        "description",
+        "reports",
+        "renouncements",
+        "last_confirmed_at",
+        "r_lat",
+        "r_lng",
+      ]
+      let changed = false
+      for (const key of paramsToClear) {
+        if (url.searchParams.has(key)) {
+          url.searchParams.delete(key)
+          changed = true
+        }
+      }
+      if (changed) {
+        window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`)
       }
     }
 
-    const paramsToClear = [
-      "barrier_payload",
-      "report",
-      "category",
-      "description",
-      "reports",
-      "renouncements",
-      "last_confirmed_at",
-      "r_lat",
-      "r_lng",
-    ]
-    let changed = false
-    for (const key of paramsToClear) {
-      if (url.searchParams.has(key)) {
-        url.searchParams.delete(key)
-        changed = true
-      }
-    }
-    if (changed) {
-      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`)
+    void loadSharedFromUrl()
+    return () => {
+      cancelled = true
     }
   }, [])
 
@@ -307,6 +379,10 @@ export function MapContainer() {
     if (!sharedReport) return
     const match = nearbyReports.find((report) => report.report_id === sharedReport.report_id)
     const resolvedReport = match ?? sharedReport
+    const sourceReports = match ? nearbyReports : [resolvedReport, ...nearbyReports]
+    const locationReports = sourceReports.filter((report) => !report.barrier_id)
+    setNearbyReports(locationReports)
+    setSearchResults(reportsToSearchLocations(locationReports))
     setSelectedReport(resolvedReport)
     if (resolvedReport.coordinates) {
       void mapManager.focusReport(resolvedReport.report_id, resolvedReport.coordinates, 13.5)
@@ -317,7 +393,16 @@ export function MapContainer() {
       pushView("ReportDetails")
     }, 0)
     setSharedReport(null)
-  }, [nearbyReports, pushView, resetNav, setActiveMode, setSelectedReport, sharedReport])
+  }, [
+    nearbyReports,
+    pushView,
+    resetNav,
+    setActiveMode,
+    setNearbyReports,
+    setSearchResults,
+    setSelectedReport,
+    sharedReport,
+  ])
 
   useEffect(() => {
     if (!analysisPayload) return
@@ -536,10 +621,18 @@ export function MapContainer() {
         mapManager.getReportById(reportId)
       if (!match) return
 
+      const sourceReports = nearbyReports.some((report) => report.report_id === match.report_id)
+        ? nearbyReports
+        : [match, ...nearbyReports]
+      const locationReports = sourceReports.filter((report) => !report.barrier_id)
+      setNearbyReports(locationReports)
+      setSearchResults(reportsToSearchLocations(locationReports))
       setSelectedReport(match)
 
       if (activeMode !== "search" || currentView !== "ReportDetails") {
-        setActiveMode("search")
+        if (activeMode !== "search") {
+          setActiveMode("search")
+        }
         window.setTimeout(() => {
           resetNav("SearchResults")
           pushView("ReportDetails")
@@ -557,6 +650,8 @@ export function MapContainer() {
     pushView,
     resetNav,
     setActiveMode,
+    setNearbyReports,
+    setSearchResults,
     setSelectedReport,
   ])
 

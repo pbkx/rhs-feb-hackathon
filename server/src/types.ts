@@ -184,4 +184,5 @@ export interface AggregatedReport {
   delta_nas_points: number | null
   delta_oas_points: number | null
   destinations_unlocked: number | null
+  calculation_method: string | null
 }

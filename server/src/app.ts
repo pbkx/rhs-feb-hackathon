@@ -6,7 +6,7 @@ import express from "express"
 import { z } from "zod"
 import { cacheKey, readJsonCache, writeJsonCache } from "./lib/cache"
 import { bboxAreaDegrees, haversineMeters, normalizeBBox } from "./lib/geo"
-import { runAnalysisPipeline } from "./services/analysis"
+import { ANALYSIS_CALCULATION_METHOD, runAnalysisPipeline } from "./services/analysis"
 import { overpassToPoisGeojson } from "./services/pois"
 import {
   fetchOverpassPois,
@@ -81,6 +81,84 @@ const reportSchema = z.object({
 const reportFeedbackSchema = z.object({
   action: z.enum(["confirm", "renounce"]),
 })
+
+const sharedBarrierSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  type: z.string().min(1),
+  gain: z.number(),
+  upstreamBlocked: z.number(),
+  confidence: z.enum(["high", "medium", "low"]),
+  distance: z.number(),
+  deltaNas: z.number(),
+  deltaOas: z.number(),
+  deltaGeneral: z.number(),
+  baselineIndex: z.number(),
+  postFixIndex: z.number(),
+  unlockedPoiCount: z.number(),
+  unlockedDestinationCounts: z.record(z.number()),
+  unlockedComponentId: z.number().nullable(),
+  score: z.number(),
+  osmId: z.string().min(1),
+  reportCount: z.number().optional(),
+  renouncements: z.number().optional(),
+  tags: z.record(z.string()),
+  inferredSignals: z.array(z.string()),
+  reason: z.string().optional(),
+  locationLabel: z.string().optional(),
+  calculationMethod: z.string().optional(),
+  lat: z.number(),
+  lng: z.number(),
+})
+
+const sharedReportSchema = z.object({
+  report_id: z.string().min(1),
+  created_at: z.string().min(1),
+  updated_at: z.string().min(1),
+  last_confirmed_at: z.string().nullable(),
+  barrier_id: z.string().optional(),
+  category: z.string().min(1),
+  description: z.string().min(1),
+  blocked_steps: z.number().int().nullable(),
+  include_coordinates: z.boolean(),
+  coordinates: z.tuple([z.number(), z.number()]).nullable(),
+  reports_count: z.number().int(),
+  confirmations: z.number().int(),
+  renouncements: z.number().int(),
+  effective_reports: z.number().int(),
+  confidence: z.enum(["high", "medium", "low"]),
+  accessible_unlock_m: z.number().nullable(),
+  blocked_segment_m: z.number().nullable(),
+  distance_m: z.number().nullable(),
+  delta_general_points: z.number().nullable(),
+  delta_nas_points: z.number().nullable(),
+  delta_oas_points: z.number().nullable(),
+  destinations_unlocked: z.number().nullable(),
+  calculation_method: z.string().nullable(),
+})
+
+const shareCreateSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("barrier"),
+    barrier: sharedBarrierSchema,
+  }),
+  z.object({
+    kind: z.literal("report"),
+    report: sharedReportSchema,
+  }),
+])
+
+type SharedCacheRecord =
+  | {
+      kind: "barrier"
+      barrier: z.infer<typeof sharedBarrierSchema>
+      created_at: string
+    }
+  | {
+      kind: "report"
+      report: z.infer<typeof sharedReportSchema>
+      created_at: string
+    }
 
 function asJobError(error: unknown): JobError {
   if (error instanceof Error) {
@@ -185,6 +263,7 @@ interface ReportMetricSnapshot {
   delta_nas_points: number | null
   delta_oas_points: number | null
   destinations_unlocked: number | null
+  calculation_method: string | null
 }
 
 function bboxFromCenterRadiusKm(center: [number, number], radiusKm: number): BBox {
@@ -214,12 +293,14 @@ function defaultReportMetrics(report: AggregatedReport): ReportMetricSnapshot {
     delta_nas_points: 0,
     delta_oas_points: 0,
     destinations_unlocked: 0,
+    calculation_method: null,
   }
 }
 
 function metricsFromCandidate(
   candidate: AccessBlockerCandidate,
-  blockedSteps: number | null
+  blockedSteps: number | null,
+  calculationMethod: string | null
 ): ReportMetricSnapshot {
   return {
     accessible_unlock_m: toNullableNumber(candidate.unlock_m, 0),
@@ -231,6 +312,7 @@ function metricsFromCandidate(
     delta_nas_points: toNullableNumber(candidate.delta_nas_points, 3),
     delta_oas_points: toNullableNumber(candidate.delta_oas_points, 3),
     destinations_unlocked: toNullableNumber(candidate.unlocked_poi_count, 0),
+    calculation_method: calculationMethod,
   }
 }
 
@@ -268,6 +350,7 @@ async function computeAndCacheReportMetrics(reportId: string): Promise<void> {
 
     let metrics = defaultReportMetrics(report)
     let candidate: AccessBlockerCandidate | null = null
+    let calculationMethod: string | null = null
 
     if (report.coordinates) {
       const bbox = bboxFromCenterRadiusKm(report.coordinates, REPORT_METRIC_RADIUS_KM)
@@ -279,15 +362,22 @@ async function computeAndCacheReportMetrics(reportId: string): Promise<void> {
         anchor: report.coordinates,
         reports: areaReports,
       })
+      calculationMethod = computed.payload.meta.calculation_method
       candidate = pickReportMetricsCandidate(computed.payload.rankings, report)
     } else if (report.barrier_id) {
       const mergedCache = mergeCachedPayloads(await readCachedResultPayloads())
+      calculationMethod = mergedCache.meta.calculation_method
       candidate =
         mergedCache.rankings.find((ranking) => ranking.barrier_id === report.barrier_id) ?? null
     }
 
     if (candidate) {
-      metrics = metricsFromCandidate(candidate, report.blocked_steps)
+      metrics = metricsFromCandidate(candidate, report.blocked_steps, calculationMethod)
+    } else if (calculationMethod) {
+      metrics = {
+        ...metrics,
+        calculation_method: calculationMethod,
+      }
     }
 
     await writeJsonCache("report-metrics", reportId, metrics)
@@ -320,8 +410,7 @@ function emptyBootstrapPayload(): AnalysisResultPayload {
     meta: {
       bbox: [-180, -85, 180, 85],
       warnings: [],
-      calculation_method:
-        "Startup bootstrap from cached analysis results. Run a fresh analysis for up-to-date area scoring.",
+      calculation_method: ANALYSIS_CALCULATION_METHOD,
       overpass_query_version: "bootstrap-cache-v1",
       profile_assumptions: ["Cached barriers and reports merged across prior analysis runs"],
       accessibility: {
@@ -659,6 +748,58 @@ export function createApp() {
     } catch (error) {
       console.error("[search] error", error)
       return res.status(500).json({ error: { message: "Search failed", code: "SEARCH_FAILED" } })
+    }
+  })
+
+  app.post("/share", async (req, res) => {
+    const parsed = shareCreateSchema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: { message: parsed.error.issues[0]?.message ?? "Invalid share payload", code: "BAD_REQUEST" },
+      })
+    }
+
+    try {
+      const created_at = new Date().toISOString()
+      const cacheRecord: SharedCacheRecord =
+        parsed.data.kind === "barrier"
+          ? {
+              kind: "barrier",
+              barrier: parsed.data.barrier,
+              created_at,
+            }
+          : {
+              kind: "report",
+              report: parsed.data.report,
+              created_at,
+            }
+      const cache_id = cacheKey(JSON.stringify({ v: 1, ...cacheRecord }))
+      await writeJsonCache("shares", cache_id, cacheRecord)
+      return res.json({ ok: true, cache_id })
+    } catch (error) {
+      console.error("[share] save error", error)
+      return res.status(500).json({ error: { message: "Failed to save share payload", code: "SHARE_SAVE_FAILED" } })
+    }
+  })
+
+  app.get("/share/:cache_id", async (req, res) => {
+    try {
+      const cacheId = String(req.params.cache_id ?? "").trim()
+      if (!cacheId) {
+        return res.status(400).json({ error: { message: "cache_id is required", code: "BAD_REQUEST" } })
+      }
+      const shared = await readJsonCache<SharedCacheRecord>("shares", cacheId)
+      if (!shared) {
+        return res.status(404).json({ error: { message: "Shared payload not found", code: "SHARE_NOT_FOUND" } })
+      }
+      return res.json({
+        ok: true,
+        cache_id: cacheId,
+        ...shared,
+      })
+    } catch (error) {
+      console.error("[share] load error", error)
+      return res.status(500).json({ error: { message: "Failed to load shared payload", code: "SHARE_LOAD_FAILED" } })
     }
   })
 

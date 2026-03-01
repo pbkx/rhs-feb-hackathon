@@ -3,7 +3,13 @@
 import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
 import { useAppState, type BBox, type MockLocation } from "@/lib/app-context"
-import { getReports, submitReportFeedback, search as searchApi, type ReportRecord } from "@/lib/api/client"
+import {
+  createShare,
+  getReports,
+  submitReportFeedback,
+  search as searchApi,
+  type ReportRecord,
+} from "@/lib/api/client"
 import { copyTextToClipboard } from "@/lib/clipboard"
 import { mapManager } from "@/lib/map/manager"
 import { reportDisplayId } from "@/lib/report-id"
@@ -16,7 +22,6 @@ import {
   Search,
   MapPin,
   AlertTriangle,
-  Crosshair,
   Clock,
   Link2,
   ChevronDown,
@@ -27,7 +32,6 @@ import {
 const findNearbyItems = [
   { key: "barriers", label: "Nearby Blockers", icon: AlertTriangle, bgColor: "#FF9500", iconColor: "#FFFFFF" },
   { key: "reports", label: "Nearby Reports", icon: MapPin, bgColor: "#FF3B30", iconColor: "#FFFFFF" },
-  { key: "high-impact", label: "Highest Impact", icon: Crosshair, bgColor: "#007AFF", iconColor: "#FFFFFF" },
 ]
 
 const reportConfidenceColors: Record<ReportRecord["confidence"], { bg: string; text: string; rank: number }> = {
@@ -36,6 +40,9 @@ const reportConfidenceColors: Record<ReportRecord["confidence"], { bg: string; t
   low: { bg: "#FF3B30", text: "#FFFFFF", rank: 1 },
 }
 
+const DEFAULT_CALCULATION_METHOD =
+  "General Accessibility Index = 0.7 * Network Accessibility Score + 0.3 * Opportunity Accessibility Score. Blockers are ranked by simulated post-fix score delta and unlocked passable meters."
+
 function formatScoreDelta(value: number | null | undefined) {
   if (value === null || value === undefined || !Number.isFinite(value)) return "0.0"
   const sign = value > 0 ? "+" : ""
@@ -43,16 +50,19 @@ function formatScoreDelta(value: number | null | undefined) {
 }
 
 function reportConfidenceReasons(report: ReportRecord): string[] {
-  const effectiveReports = Math.max(0, Number(report.effective_reports) || 0)
+  const reportsCount = Math.max(0, Number(report.reports_count) || 0)
+  const renouncements = Math.max(0, Number(report.renouncements) || 0)
+  const netSignal = reportsCount - renouncements
   const reasons = [
-    `Effective reports: ${report.reports_count} reports - ${report.renouncements} renouncements = ${effectiveReports}.`,
+    `Reports: ${reportsCount}.`,
+    `Renouncements: ${renouncements}.`,
   ]
   if (report.confidence === "high") {
-    reasons.push("High confidence is assigned when effective reports are at least 3.")
+    reasons.push(`High confidence because reports minus renouncements is ${netSignal} (>= 3).`)
   } else if (report.confidence === "medium") {
-    reasons.push("Medium confidence is assigned when effective reports are at least 2.")
+    reasons.push(`Medium confidence because reports minus renouncements is ${netSignal} (>= 2).`)
   } else {
-    reasons.push("Low confidence is assigned when effective reports are below 2.")
+    reasons.push(`Low confidence because reports minus renouncements is ${netSignal} (< 2).`)
   }
   if (report.last_confirmed_at) {
     reasons.push(`Last confirmation recorded at ${new Date(report.last_confirmed_at).toLocaleString()}.`)
@@ -92,10 +102,8 @@ export function SearchHome() {
     setSelectedLocation,
     setActiveMode,
     resetNav,
-    setSortBy,
     setAnalysisAnchor,
     setAnalysisAnchorPoiId,
-    setFilterTypes,
     setBbox,
     setAnalysisStatus,
     setCurrentStep,
@@ -103,7 +111,6 @@ export function SearchHome() {
     setAnalysisPayload,
     setNearbyReports,
     setSelectedReport,
-    candidates,
     recentSearches,
     searchResults,
     setSearchResults,
@@ -163,50 +170,22 @@ export function SearchHome() {
   const openResult = (location: MockLocation) => {
     setSelectedLocation(location)
     addRecentSearch(location.name, location.subtitle)
-    const analysisBbox = location.bbox ?? bboxFromCenterRadiusKm([location.lng, location.lat], 20)
-    startAnalyze({
-      bbox: analysisBbox,
-      anchor: [location.lng, location.lat],
-      anchorPoiId: null,
+    void mapManager.flyTo({
+      bbox: location.bbox ?? undefined,
+      center: [location.lng, location.lat],
+      zoom: 12.5,
     })
+    pushView("SearchResults")
   }
 
   const openRecent = async (item: { query: string; subtitle: string }) => {
     setSearchQuery(item.query)
     try {
       const response = await searchApi(item.query)
-      const mapped = response.map(toLocation)
-      setSearchResults(mapped)
-      if (mapped.length > 0) {
-        openResult(mapped[0])
-        return
-      }
+      setSearchResults(response.map(toLocation))
       pushView("SearchResults")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Search failed")
-    }
-  }
-
-  const openNearbyCandidates = (type: "barriers" | "high-impact") => {
-    if (candidates.length === 0) {
-      toast.message("Run an analysis first to see nearby candidates")
-      return
-    }
-
-    setActiveMode("search")
-    resetNav("AnalyzeResults")
-    setSortBy("impact")
-    if (type === "barriers") {
-      setFilterTypes([
-        "stairs",
-        "raised_kerb",
-        "steep_incline",
-        "rough_surface",
-        "wheelchair_no",
-        "access_no",
-      ])
-    } else {
-      setFilterTypes([])
     }
   }
 
@@ -272,9 +251,7 @@ export function SearchHome() {
     }
     if (key === "barriers") {
       startAnalyzeFromCurrentView()
-      return
     }
-    openNearbyCandidates("high-impact")
   }
 
   return (
@@ -292,17 +269,13 @@ export function SearchHome() {
             <Search className="h-[15px] w-[15px] text-[#86868B] flex-shrink-0" strokeWidth={1.8} />
             <input
               type="text"
-              placeholder="Search places, then auto-analyze..."
+              placeholder="Search places"
               value={query}
               onChange={(e) => setSearchQuery(e.target.value)}
               onFocus={() => setIsFocused(true)}
               onBlur={() => setIsFocused(false)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && query.trim()) {
-                  if (filteredLocations.length > 0) {
-                    openResult(filteredLocations[0])
-                    return
-                  }
                   addRecentSearch(query.trim(), "Search query")
                   pushView("SearchResults")
                 }
@@ -401,6 +374,8 @@ export function SearchHome() {
 
 export function SearchResults() {
   const {
+    currentView,
+    activeMode,
     searchResults,
     nearbyReports,
     candidates,
@@ -409,7 +384,6 @@ export function SearchResults() {
     setSelectedBarrier,
     setSelectedReport,
     setActiveMode,
-    resetNav,
     pushView,
   } = useAppState()
   const [reportSortBy, setReportSortBy] = useState<"confidence" | "distance">("confidence")
@@ -449,7 +423,7 @@ export function SearchResults() {
 
   return (
     <div className="flex flex-col h-full">
-      <PanelHeader title="Results" />
+      <PanelHeader title={showingReportResults ? "Nearby Reports" : "Results"} />
       <div className="flex-1 overflow-y-auto panel-scroll">
         <p className="text-[13px] font-normal text-[#86868B] pt-3 pb-2 px-5">
           {showingReportResults ? `${sortedReportResults.length} reports found` : `${results.length} locations found`}
@@ -487,9 +461,10 @@ export function SearchResults() {
                       } else {
                         void mapManager.setSelectedReport(report.report_id)
                       }
-                      setActiveMode("search")
+                      if (activeMode !== "search") {
+                        setActiveMode("search")
+                      }
                       window.setTimeout(() => {
-                        resetNav("SearchResults")
                         pushView("ReportDetails")
                       }, 0)
                     }}
@@ -543,9 +518,13 @@ export function SearchResults() {
                       if (match) {
                         setSelectedBarrier(match)
                         void mapManager.focusBarrier(match.id, [match.lng, match.lat], 13.5)
-                        setActiveMode("search")
+                        if (activeMode !== "search") {
+                          setActiveMode("search")
+                        }
                         window.setTimeout(() => {
-                          resetNav("AnalyzeResults")
+                          if (currentView !== "AnalyzeResults") {
+                            pushView("AnalyzeResults")
+                          }
                           pushView("BarrierDetails")
                         }, 0)
                         return
@@ -560,9 +539,10 @@ export function SearchResults() {
                         } else {
                           void mapManager.setSelectedReport(report.report_id)
                         }
-                        setActiveMode("search")
+                        if (activeMode !== "search") {
+                          setActiveMode("search")
+                        }
                         window.setTimeout(() => {
-                          resetNav("SearchResults")
                           pushView("ReportDetails")
                         }, 0)
                         return
@@ -635,8 +615,9 @@ export function ReportDetails() {
   const destinationsUnlocked = report.destinations_unlocked ?? 0
   const confidenceReasons = reportConfidenceReasons(report)
   const calculationMethod =
+    report.calculation_method ??
     analysisPayload?.meta.calculation_method ??
-    "General accessibility scoring based on network continuity and reachable opportunities."
+    DEFAULT_CALCULATION_METHOD
   const coordinatesDisplay = report.coordinates
     ? `${report.coordinates[1].toFixed(6)}, ${report.coordinates[0].toFixed(6)}`
     : "N/A"
@@ -703,19 +684,13 @@ export function ReportDetails() {
   const handleCopyLink = async () => {
     try {
       const url = new URL(window.location.href)
-      url.searchParams.set("report", report.report_id)
-      url.searchParams.set("category", report.category || "Report")
-      url.searchParams.set("description", report.description || "")
-      url.searchParams.set("confidence", report.confidence)
-      url.searchParams.set("reports", String(report.reports_count))
-      url.searchParams.set("renouncements", String(report.renouncements))
-      if (report.last_confirmed_at) {
-        url.searchParams.set("last_confirmed_at", report.last_confirmed_at)
+      url.search = ""
+      const reportForShare: ReportRecord = {
+        ...report,
+        calculation_method: calculationMethod,
       }
-      if (report.coordinates) {
-        url.searchParams.set("r_lat", report.coordinates[1].toFixed(6))
-        url.searchParams.set("r_lng", report.coordinates[0].toFixed(6))
-      }
+      const share = await createShare({ kind: "report", report: reportForShare })
+      url.searchParams.set("share", share.cache_id)
       await copyTextToClipboard(url.toString())
       toast.success("Report link copied")
     } catch {

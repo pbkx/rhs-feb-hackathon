@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
 import { useAppState, type BBox } from "@/lib/app-context"
-import { analyze, getReports, getResult } from "@/lib/api/client"
+import { analyze, createShare, getReports, getResult } from "@/lib/api/client"
 import { candidatesFromAnalyzeResult } from "@/lib/barrier-candidate"
 import { copyTextToClipboard } from "@/lib/clipboard"
 import { mapManager } from "@/lib/map/manager"
@@ -52,6 +52,9 @@ const confidenceColors: Record<string, { bg: string; text: string }> = {
   medium: { bg: "#FF9F0A", text: "#FFFFFF" },
   low: { bg: "#FF3B30", text: "#FFFFFF" },
 }
+
+const DEFAULT_CALCULATION_METHOD =
+  "General Accessibility Index = 0.7 * Network Accessibility Score + 0.3 * Opportunity Accessibility Score. Blockers are ranked by simulated post-fix score delta and unlocked passable meters."
 
 const LOADING_STEPS = [
   "Fetching OSM data...",
@@ -147,6 +150,7 @@ export function AnalyzeLoading() {
     bboxSelected,
     analysisAnchor,
     analysisAnchorPoiId,
+    resetNav,
     setAnalysisStatus,
     setCurrentStep,
     currentStep,
@@ -163,6 +167,9 @@ export function AnalyzeLoading() {
       if (!bboxSelected) {
         setAnalysisStatus("error")
         toast.error("Current map view is not ready. Try Analyze again.")
+        setAnalysisJobId(null)
+        setCurrentStep(0)
+        resetNav("SearchHome")
         return
       }
 
@@ -197,13 +204,22 @@ export function AnalyzeLoading() {
           const warning = result.meta.warnings[0]
           if (warning) toast.message(warning)
 
+          resetNav("SearchHome")
           pushView("AnalyzeResults")
           return
         }
       } catch (error) {
         if (cancelled) return
+        const message = error instanceof Error ? error.message : "Search failed"
         setAnalysisStatus("error")
-        toast.error(error instanceof Error ? error.message : "Analysis failed")
+        setAnalysisJobId(null)
+        setCurrentStep(0)
+        if (message.toLowerCase().includes("bbox too large")) {
+          toast.error("BBox too large for demo. Zoom in, then search again.")
+        } else {
+          toast.error(message)
+        }
+        resetNav("SearchHome")
       }
     }
 
@@ -216,6 +232,7 @@ export function AnalyzeLoading() {
     analysisAnchor,
     analysisAnchorPoiId,
     pushView,
+    resetNav,
     setAnalysisJobId,
     setAnalysisPayload,
     setAnalysisStatus,
@@ -225,7 +242,7 @@ export function AnalyzeLoading() {
 
   return (
     <div className="flex flex-col h-full">
-      <PanelHeader title="Analyzing" />
+      <PanelHeader title="Searching" />
       <div className="flex-1 overflow-y-auto panel-scroll px-4 pb-6 pt-6">
         <div className="flex flex-col gap-4">
           {LOADING_STEPS.map((label, i) => {
@@ -369,7 +386,7 @@ export function AnalyzeResults() {
 
   return (
     <div className="flex flex-col h-full">
-      <PanelHeader title="Top Access Blockers" />
+      <PanelHeader title="Nearby Blockers" />
       <div className="flex-1 overflow-y-auto panel-scroll px-4 pb-6">
         <p className="text-[13px] font-normal text-[#86868B] pt-3 pb-2 px-1">
           {radius === "viewport"
@@ -552,7 +569,7 @@ export function BarrierDetails() {
   const calculationMethod =
     b.calculationMethod ??
     analysisPayload?.meta.calculation_method ??
-    "General accessibility scoring based on network continuity and reachable opportunities."
+    DEFAULT_CALCULATION_METHOD
   const osmIdDisplay = b.osmId.startsWith("way/") ? b.osmId.split("/")[1] ?? "N/A" : "N/A"
   const isReportBarrier = b.type === "report"
   const reportsDisplay =
@@ -568,15 +585,15 @@ export function BarrierDetails() {
     try {
       const url = new URL(window.location.href)
       url.search = ""
-      url.searchParams.set(
-        "barrier_payload",
-        JSON.stringify({
-          barrier: {
-            ...b,
-            calculationMethod,
-          },
-        })
-      )
+      const barrierForShare = {
+        ...b,
+        calculationMethod,
+      }
+      const share = await createShare({
+        kind: "barrier",
+        barrier: barrierForShare,
+      })
+      url.searchParams.set("share", share.cache_id)
       await copyTextToClipboard(url.toString())
       toast.success("Barrier link copied")
     } catch {

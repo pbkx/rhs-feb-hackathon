@@ -38,8 +38,8 @@ const LAYER_USER_ACCURACY_BASE = "user-accuracy-base-layer"
 const LAYER_USER_ACCURACY = "user-accuracy-layer"
 const LAYER_USER_ACCURACY_STROKE = "user-accuracy-stroke-layer"
 
-const MARKER_FADE_OUT_ZOOM = 10.0
-const MARKER_FADE_IN_ZOOM = 11.6
+const MARKER_FADE_OUT_ZOOM = 10.5
+const MARKER_FADE_IN_ZOOM = 12.1
 
 const emptyPointCollection = (): FeatureCollection<Point> => ({
   type: "FeatureCollection",

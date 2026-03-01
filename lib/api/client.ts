@@ -155,11 +155,93 @@ export interface ReportRecord {
   delta_nas_points: number | null
   delta_oas_points: number | null
   destinations_unlocked: number | null
+  calculation_method: string | null
 }
 
 export interface BootstrapResponse {
   analysis_payload: AnalyzeResultPayload
   reports: ReportRecord[]
+}
+
+export interface SharedBarrierPayload {
+  id: string
+  name: string
+  type: string
+  gain: number
+  upstreamBlocked: number
+  confidence: "high" | "medium" | "low"
+  distance: number
+  deltaNas: number
+  deltaOas: number
+  deltaGeneral: number
+  baselineIndex: number
+  postFixIndex: number
+  unlockedPoiCount: number
+  unlockedDestinationCounts: Record<string, number>
+  unlockedComponentId: number | null
+  score: number
+  osmId: string
+  reportCount?: number
+  renouncements?: number
+  tags: Record<string, string>
+  inferredSignals: string[]
+  reason?: string
+  locationLabel?: string
+  calculationMethod?: string
+  lat: number
+  lng: number
+}
+
+export type SharePayloadResponse =
+  | {
+      ok: true
+      cache_id: string
+      kind: "barrier"
+      barrier: SharedBarrierPayload
+      created_at: string
+    }
+  | {
+      ok: true
+      cache_id: string
+      kind: "report"
+      report: ReportRecord
+      created_at: string
+    }
+
+interface ApiErrorEnvelope {
+  error?: {
+    message?: string
+  }
+}
+
+async function parseJsonBody<T>(response: Response, context: string): Promise<T> {
+  const raw = await response.text()
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    throw new Error(`Empty response from ${context}`)
+  }
+
+  try {
+    return JSON.parse(trimmed) as T
+  } catch {
+    throw new Error(`Unexpected response format from ${context}. Check API server configuration.`)
+  }
+}
+
+async function extractErrorMessage(response: Response, fallback: string): Promise<string> {
+  const raw = await response.text()
+  const trimmed = raw.trim()
+  if (!trimmed) return fallback
+  try {
+    const json = JSON.parse(trimmed) as ApiErrorEnvelope
+    const message = json?.error?.message
+    if (typeof message === "string" && message.trim().length > 0) {
+      return message
+    }
+  } catch {
+    // non-JSON error body
+  }
+  return fallback
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -171,16 +253,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     },
   })
   if (!response.ok) {
-    let message = `Request failed (${response.status})`
-    try {
-      const json = await response.json()
-      message = json?.error?.message ?? message
-    } catch {
-      // no-op
-    }
+    const message = await extractErrorMessage(response, `Request failed (${response.status})`)
     throw new Error(message)
   }
-  return (await response.json()) as T
+  return parseJsonBody<T>(response, path)
 }
 
 export async function analyze(
@@ -201,19 +277,13 @@ export async function analyze(
 export async function getResult(jobId: string): Promise<RunningResult | AnalyzeResultPayload> {
   const response = await fetch(`${API_BASE_URL}/result/${jobId}`)
   if (response.status === 202) {
-    return (await response.json()) as RunningResult
+    return parseJsonBody<RunningResult>(response, `/result/${jobId}`)
   }
   if (!response.ok) {
-    let message = `Result request failed (${response.status})`
-    try {
-      const json = await response.json()
-      message = json?.error?.message ?? message
-    } catch {
-      // no-op
-    }
+    const message = await extractErrorMessage(response, `Result request failed (${response.status})`)
     throw new Error(message)
   }
-  return (await response.json()) as AnalyzeResultPayload
+  return parseJsonBody<AnalyzeResultPayload>(response, `/result/${jobId}`)
 }
 
 export async function getPois(bbox: BBox): Promise<PoisResponse> {
@@ -259,4 +329,21 @@ export async function submitReportFeedback(
 
 export async function getBootstrap(): Promise<BootstrapResponse> {
   return request<BootstrapResponse>("/bootstrap")
+}
+
+export async function createShare(payload: {
+  kind: "barrier"
+  barrier: SharedBarrierPayload
+} | {
+  kind: "report"
+  report: ReportRecord
+}): Promise<{ ok: true; cache_id: string }> {
+  return request<{ ok: true; cache_id: string }>("/share", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function getShare(cacheId: string): Promise<SharePayloadResponse> {
+  return request<SharePayloadResponse>(`/share/${encodeURIComponent(cacheId)}`)
 }

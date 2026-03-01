@@ -25,6 +25,8 @@ const MAX_POI_SNAP_DISTANCE_M = 220
 const MAX_ANCHOR_SNAP_DISTANCE_M = 450
 const REPORT_SIGNAL_DISTANCE_M = 70
 const MAX_REPORT_SNAP_DISTANCE_M = 260
+export const ANALYSIS_CALCULATION_METHOD =
+  "General Accessibility Index = 0.7 * Network Accessibility Score + 0.3 * Opportunity Accessibility Score. Blockers are ranked by simulated post-fix score delta and unlocked passable meters."
 
 const PEDESTRIAN_HIGHWAYS = new Set(["footway", "path", "pedestrian", "steps", "living_street"])
 const BLOCKED_ACCESS_VALUES = new Set(["no", "private", "military"])
@@ -1320,8 +1322,7 @@ export function runAnalysisPipeline(
   const limitedEdges = edges.filter((edge) => edge.classification.status === "LIMITED").length
   const blockedEdges = edges.filter((edge) => edge.classification.status === "BLOCKED").length
 
-  const calculationMethod =
-    "General Accessibility Index = 0.7 * Network Accessibility Score + 0.3 * Opportunity Accessibility Score. Blockers are ranked by simulated post-fix score delta and unlocked passable meters."
+  const calculationMethod = ANALYSIS_CALCULATION_METHOD
 
   return {
     payload: {
