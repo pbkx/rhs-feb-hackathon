@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react"
 import { useAppState } from "@/lib/app-context"
-import { submitReport } from "@/lib/api/client"
+import { getBootstrap, getReports, submitReport } from "@/lib/api/client"
+import { candidatesFromAnalyzeResult } from "@/lib/barrier-candidate"
 import { PanelHeader } from "@/components/panel-header"
 import { mapManager } from "@/lib/map/manager"
 import { MapPin, CheckCircle2, ChevronDown } from "lucide-react"
@@ -24,12 +25,16 @@ const barrierCategories = ["Incorrect blocker", "Accessibility issue", "Other"]
 export function ReportForm() {
   const {
     selectedBarrier,
+    setSelectedBarrier,
     reportDraft,
     updateReportDraft,
     reportLocationMode,
     setReportLocationMode,
     pushView,
     resetReportDraft,
+    analysisPayload,
+    setAnalysisPayload,
+    setCandidates,
   } = useAppState()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const isBarrierReport = Boolean(reportDraft.barrierId)
@@ -59,6 +64,7 @@ export function ReportForm() {
     try {
       setIsSubmitting(true)
       const includeCoordinates = !isBarrierReport
+      const submittedBarrierId = reportDraft.barrierId ?? null
       const blockedStepsRaw = reportDraft.blockedSteps.trim()
       const blockedSteps =
         blockedStepsRaw.length > 0 && Number.isFinite(Number(blockedStepsRaw))
@@ -73,6 +79,45 @@ export function ReportForm() {
         include_coordinates: includeCoordinates,
         coordinates: includeCoordinates ? reportDraft.coordinates : null,
       })
+
+      if (submittedBarrierId && analysisPayload) {
+        void (async () => {
+          try {
+            const reportsResponse = await getReports()
+            const refreshedCandidates = candidatesFromAnalyzeResult(
+              analysisPayload,
+              reportsResponse.reports
+            )
+            setCandidates(refreshedCandidates)
+            const updatedSelected =
+              refreshedCandidates.find((candidate) => candidate.id === submittedBarrierId) ?? null
+            if (updatedSelected) {
+              setSelectedBarrier(updatedSelected)
+            }
+          } catch (error) {
+            console.warn("[report] failed to refresh barrier confidence", error)
+          }
+        })()
+      } else if (submittedBarrierId) {
+        void (async () => {
+          try {
+            const bootstrap = await getBootstrap()
+            setAnalysisPayload(bootstrap.analysis_payload)
+            const refreshedCandidates = candidatesFromAnalyzeResult(
+              bootstrap.analysis_payload,
+              bootstrap.reports
+            )
+            setCandidates(refreshedCandidates)
+            const updatedSelected =
+              refreshedCandidates.find((candidate) => candidate.id === submittedBarrierId) ?? null
+            if (updatedSelected) {
+              setSelectedBarrier(updatedSelected)
+            }
+          } catch (error) {
+            console.warn("[report] failed bootstrap confidence refresh", error)
+          }
+        })()
+      }
 
       toast.success("Report submitted successfully")
       setReportLocationMode(false)
