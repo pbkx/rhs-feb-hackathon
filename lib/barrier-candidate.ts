@@ -128,38 +128,76 @@ export function applyReportConfidenceSignals(
   candidates: MockBarrier[],
   reports: ReportRecord[]
 ): MockBarrier[] {
-  const effectiveByBarrier = new Map<string, number>()
+  const evidenceByBarrier = new Map<string, { support: number; incorrect: number }>()
 
   for (const report of reports) {
     if (!report.barrier_id || report.effective_reports <= 0) continue
     const key = report.barrier_id.trim()
     if (!key) continue
-    const effective = Math.max(0, Number(report.effective_reports) || 0)
-    effectiveByBarrier.set(key, (effectiveByBarrier.get(key) ?? 0) + effective)
+    const effective = Math.max(0, Math.round(Number(report.effective_reports) || 0))
+    if (effective <= 0) continue
+    const category = String(report.category ?? "").trim().toLowerCase()
+    const isIncorrectCategory =
+      category === "incorrect blocker" ||
+      category === "incorrect barrier" ||
+      category.startsWith("incorrect")
+    const current = evidenceByBarrier.get(key) ?? { support: 0, incorrect: 0 }
+    if (isIncorrectCategory) {
+      current.incorrect += effective
+    } else {
+      current.support += effective
+    }
+    evidenceByBarrier.set(key, current)
   }
 
   return candidates.map((candidate) => {
     const base = normalizeCandidateSignals(candidate)
-    const effectiveReports = effectiveByBarrier.get(candidate.id) ?? 0
+    const evidence = evidenceByBarrier.get(candidate.id) ?? { support: 0, incorrect: 0 }
+    const supportReports = evidence.support
+    const incorrectReports = evidence.incorrect
     const inferredSignals = base.inferredSignals.filter(
       (signal) =>
         signal !== "Reported" &&
-        !/^Reported by \(?\d+\)? users\.?$/i.test(signal.trim())
+        !/^Reported by \(?\d+\)? users\.?$/i.test(signal.trim()) &&
+        !/^Marked incorrect by \(?\d+\)? users\.?$/i.test(signal.trim())
     )
-    if (effectiveReports <= 0) {
+    if (supportReports <= 0 && incorrectReports <= 0) {
       return {
         ...base,
         inferredSignals,
       }
     }
 
-    let confidence = base.confidence
-    if (effectiveReports >= 2) {
-      confidence = "high"
-    } else if (effectiveReports >= 1 && confidence === "low") {
-      confidence = "medium"
+    const confidenceRank: Record<MockBarrier["confidence"], number> = {
+      low: 0,
+      medium: 1,
+      high: 2,
     }
-    inferredSignals.push(`Reported by ${effectiveReports} users.`)
+    const rankToConfidence: Record<number, MockBarrier["confidence"]> = {
+      0: "low",
+      1: "medium",
+      2: "high",
+    }
+
+    let rank = confidenceRank[base.confidence]
+    const netReports = supportReports - incorrectReports
+    if (netReports >= 2) {
+      rank = 2
+    } else if (netReports === 1 && rank < 1) {
+      rank = 1
+    } else if (netReports === -1) {
+      rank = Math.max(0, rank - 1)
+    } else if (netReports <= -2) {
+      rank = 0
+    }
+    const confidence = rankToConfidence[rank]
+
+    if (supportReports > 0) {
+      inferredSignals.push(`Reported by ${supportReports} users.`)
+    }
+    if (incorrectReports > 0) {
+      inferredSignals.push(`Marked incorrect by ${incorrectReports} users.`)
+    }
 
     return {
       ...base,
