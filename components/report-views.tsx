@@ -69,7 +69,7 @@ export function ReportForm() {
         category: reportDraft.category,
         description: reportDraft.description.trim(),
         email: reportDraft.email.trim() || undefined,
-        blocked_steps: blockedSteps,
+        blocked_steps: includeCoordinates ? blockedSteps : undefined,
         include_coordinates: includeCoordinates,
         coordinates: includeCoordinates ? reportDraft.coordinates : null,
       })
@@ -168,20 +168,22 @@ export function ReportForm() {
             />
           </div>
 
-          <div>
-            <label className="text-[13px] font-semibold text-[#86868B] uppercase tracking-[0.06em] mb-2.5 block px-1">
-              Blocked Steps (optional)
-            </label>
-            <input
-              type="number"
-              min={0}
-              step={1}
-              value={reportDraft.blockedSteps}
-              onChange={(e) => updateReportDraft({ blockedSteps: e.target.value })}
-              placeholder="e.g. 5"
-              className="w-full h-[44px] rounded-[16px] bg-white/90 px-4 text-[15px] font-normal text-[#1D1D1F] placeholder:text-[#C7C7CC] shadow-[0_1px_4px_rgba(0,0,0,0.04)] outline-none focus:shadow-[0_0_0_2px_#007AFF] transition-shadow"
-            />
-          </div>
+          {!isBarrierReport && (
+            <div>
+              <label className="text-[13px] font-semibold text-[#86868B] uppercase tracking-[0.06em] mb-2.5 block px-1">
+                Blocked Steps (optional)
+              </label>
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={reportDraft.blockedSteps}
+                onChange={(e) => updateReportDraft({ blockedSteps: e.target.value })}
+                placeholder="e.g. 5"
+                className="w-full h-[44px] rounded-[16px] bg-white/90 px-4 text-[15px] font-normal text-[#1D1D1F] placeholder:text-[#C7C7CC] shadow-[0_1px_4px_rgba(0,0,0,0.04)] outline-none focus:shadow-[0_0_0_2px_#007AFF] transition-shadow"
+              />
+            </div>
+          )}
 
           <div>
             <label className="text-[13px] font-semibold text-[#86868B] uppercase tracking-[0.06em] mb-2.5 block px-1">

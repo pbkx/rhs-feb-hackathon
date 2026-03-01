@@ -13,7 +13,7 @@ export function PanelHeader({ title }: PanelHeaderProps) {
   const canGoBack = navStack.length > 1
 
   return (
-    <div className="sticky top-0 z-10 flex items-center gap-2 px-4 h-[52px]">
+    <div className="sticky top-0 z-40 flex h-[56px] items-center gap-2 border-b border-black/[0.04] bg-white/50 px-4 backdrop-blur-[44px]">
       {canGoBack && (
         <button
           onClick={popView}
@@ -24,7 +24,9 @@ export function PanelHeader({ title }: PanelHeaderProps) {
         </button>
       )}
       <h2 className="flex-1 text-[22px] font-bold tracking-tight text-[#1D1D1F] truncate leading-none">
-        {title}
+        <span className="relative z-10 inline-block pb-[1px] leading-[1.08]">
+          {title}
+        </span>
       </h2>
       <button
         onClick={() => {

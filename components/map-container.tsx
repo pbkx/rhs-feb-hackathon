@@ -152,6 +152,7 @@ export function MapContainer() {
     panelOpen,
     currentView,
     bboxSelected,
+    analysisStatus,
     candidates,
     selectedBarrier,
     selectedReport,
@@ -695,6 +696,30 @@ export function MapContainer() {
     }
   }
 
+  const handleRefreshMap = () => {
+    if (analysisStatus === "loading") return
+    const bbox = mapManager.getCurrentViewBBox()
+    if (!bbox) {
+      toast.error("Map view is not ready yet")
+      return
+    }
+
+    setBbox(bbox)
+    void mapManager.setBBoxDisplayMode("outline")
+    setAnalysisAnchor(null)
+    setAnalysisAnchorPoiId(null)
+    setAnalysisJobId(null)
+    setAnalysisPayload(null)
+    setCandidates([])
+    setSelectedBarrier(null)
+    setAnalysisStatus("loading")
+    setCurrentStep(0)
+    setActiveMode("search")
+    window.setTimeout(() => {
+      resetNav("AnalyzeLoading")
+    }, 0)
+  }
+
   return (
     <div className="relative flex-1 h-full overflow-hidden z-0">
       <div
@@ -702,6 +727,29 @@ export function MapContainer() {
         className="absolute inset-0 z-0"
         style={{ backgroundColor: "transparent" }}
       />
+
+      <div className="absolute top-3 left-1/2 z-20 -translate-x-1/2 px-3">
+        <button
+          onClick={handleRefreshMap}
+          disabled={analysisStatus === "loading"}
+          className="group inline-flex h-[48px] min-w-[196px] items-center justify-center gap-2.5 rounded-full border border-black/[0.08] bg-white/95 px-6 text-[15px] font-semibold text-[#1D1D1F] shadow-[0_10px_24px_rgba(0,0,0,0.16)] backdrop-blur-[18px] transition-all duration-150 hover:bg-white hover:shadow-[0_14px_30px_rgba(0,0,0,0.18)] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70"
+        >
+          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-[#007AFF]/12 text-[#007AFF]">
+            {analysisStatus === "loading" ? (
+              <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <circle cx="10" cy="10" r="7" stroke="currentColor" strokeOpacity="0.35" strokeWidth="2" />
+                <path d="M10 3a7 7 0 0 1 7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            ) : (
+              <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <path d="M16.2 10a6.2 6.2 0 1 1-1.9-4.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                <path d="M16.1 4.6v3.2h-3.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            )}
+          </span>
+          <span>{analysisStatus === "loading" ? "Refreshing..." : "Refresh map"}</span>
+        </button>
+      </div>
 
       <div className="absolute top-3 right-3 z-10 flex flex-col gap-2.5">
         <div className="flex flex-col rounded-[14px] bg-white/80 backdrop-blur-xl shadow-[0_1px_6px_rgba(0,0,0,0.08)] border border-white/60 overflow-hidden">

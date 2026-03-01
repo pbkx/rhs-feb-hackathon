@@ -2,14 +2,16 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
-import { useAppState, type BBox, type MockLocation } from "@/lib/app-context"
+import { useAppState, type MockLocation } from "@/lib/app-context"
 import {
   createShare,
+  getBootstrap,
   getReports,
   submitReportFeedback,
   search as searchApi,
   type ReportRecord,
 } from "@/lib/api/client"
+import { candidatesFromAnalyzeResult } from "@/lib/barrier-candidate"
 import { copyTextToClipboard } from "@/lib/clipboard"
 import { mapManager } from "@/lib/map/manager"
 import { reportDisplayId } from "@/lib/report-id"
@@ -100,17 +102,13 @@ export function SearchHome() {
     pushView,
     addRecentSearch,
     setSelectedLocation,
-    setActiveMode,
-    resetNav,
-    setAnalysisAnchor,
-    setAnalysisAnchorPoiId,
-    setBbox,
-    setAnalysisStatus,
-    setCurrentStep,
-    setAnalysisJobId,
     setAnalysisPayload,
+    setCandidates,
+    candidates,
     setNearbyReports,
     setSelectedReport,
+    setSelectedBarrier,
+    setRadius,
     recentSearches,
     searchResults,
     setSearchResults,
@@ -142,30 +140,6 @@ export function SearchHome() {
   }, [query, setSearchResults])
 
   const filteredLocations = searchResults
-
-  const startAnalyze = (input: {
-    bbox: BBox
-    anchor: [number, number] | null
-    anchorPoiId?: string | null
-  }) => {
-    setBbox(input.bbox)
-    void mapManager.setBBoxDisplayMode("outline")
-    setAnalysisAnchor(input.anchor)
-    setAnalysisAnchorPoiId(input.anchorPoiId ?? null)
-    setAnalysisJobId(null)
-    setAnalysisPayload(null)
-    setAnalysisStatus("loading")
-    setCurrentStep(0)
-    setActiveMode("search")
-    void mapManager.setBBox(input.bbox)
-    void mapManager.flyTo({
-      bbox: input.bbox,
-      padding: 52,
-    })
-    window.setTimeout(() => {
-      resetNav("AnalyzeLoading")
-    }, 0)
-  }
 
   const openResult = (location: MockLocation) => {
     setSelectedLocation(location)
@@ -231,17 +205,38 @@ export function SearchHome() {
     }
   }
 
-  const startAnalyzeFromCurrentView = () => {
-    const bbox = mapManager.getCurrentViewBBox()
-    if (!bbox) {
-      toast.error("Map view is not ready yet")
+  const openNearbyBlockers = async () => {
+    try {
+      const response = await getBootstrap()
+      const cachedCandidates = candidatesFromAnalyzeResult(
+        response.analysis_payload,
+        response.reports
+      )
+      setAnalysisPayload(response.analysis_payload)
+      setCandidates(cachedCandidates)
+      setNearbyReports(response.reports.filter((report) => !report.barrier_id))
+      setSelectedBarrier(null)
+      setRadius("viewport")
+      await mapManager.setAnalysisData(response.analysis_payload)
+
+      if (cachedCandidates.length === 0) {
+        toast.message("No cached blockers found. Tap Refresh map to analyze this view.")
+        return
+      }
+
+      pushView("AnalyzeResults")
+      toast.success(`Loaded ${cachedCandidates.length} cached blockers`)
       return
+    } catch (error) {
+      if (candidates.length > 0) {
+        setSelectedBarrier(null)
+        setRadius("viewport")
+        pushView("AnalyzeResults")
+        toast.message("Using existing cached blockers")
+        return
+      }
+      toast.error(error instanceof Error ? error.message : "Failed to load cached blockers")
     }
-    startAnalyze({
-      bbox,
-      anchor: null,
-      anchorPoiId: null,
-    })
   }
 
   const handleFindNearby = async (key: string) => {
@@ -250,7 +245,7 @@ export function SearchHome() {
       return
     }
     if (key === "barriers") {
-      startAnalyzeFromCurrentView()
+      await openNearbyBlockers()
     }
   }
 
